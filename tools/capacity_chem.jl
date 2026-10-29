@@ -23,11 +23,15 @@
 #     dependence stays exact for free: the interpolation weights `w_time_*` are
 #     SCALARS, so `Tc(t) = (1-w(t))*T[1,lane] + w(t)*T[2,lane]` is still a
 #     function of t after the gather.
-#   * INDEX-DERIVED (surgery, 8 sites). `Pc` reads the hybrid coefficients at
-#     `Ap[gk]`/`Ap[gk+1]`; `cos_sza_c` reads `latp[gj]`/`lonp[gi]`; `levc` IS
-#     `gk`; five emission terms gate on `gk < 2`; `NEIRegrid.lonc` is
+#   * INDEX-DERIVED (surgery, 15 sites). `Pc` reads the hybrid coefficients at
+#     `Ap[gk]`/`Ap[gk+1]` and `dp` (the emission divisor) at `dA[gk]`/`dB[gk]`;
+#     `lat_c`/`lon_c` (FastJX's lat/long) read `latp[gj]`/`lonp[gi]`; `levc` IS
+#     `gk`; five emission terms gate on `gk < 2`; the four elevated-NEI profile
+#     fractions `NEIRegrid.frac_*` are functions of `gk`; `NEIRegrid.lonc` is
 #     `lon0_deg + (gi-1/2)*dlon_deg`. None of these can be reached through a
-#     buffer, because the index itself carries the meaning.
+#     buffer, because the index itself carries the meaning. (Before the
+#     2026-10-28 stack sync the solar zenith angle was a Transport3D field,
+#     `cos_sza_c`; FastJX now computes it from lat/long and t + t_ref.)
 #
 # MEASURED (2026-08-24, reference grid 6x6x8, NC = 288). The capacity RHS
 # reproduces the reference chemistry RHS to 2.888e-14 relative, CELL FOR CELL,
@@ -75,24 +79,33 @@
 #
 # WHAT ELSE FALLS OUT. `NEIRegrid.E_*` is the conservative regrid of the NEI
 # inventory -- 137,241 source cells, const-folded at BUILD time, and the reason
-# `build_evaluator` costs 725 s at CONUS. The capacity build needs those values
-# GATHERED per lane, so it takes them as a runtime buffer instead, and the whole
-# regrid subtree prunes away. Combined with pruning to the reachable closure,
+# `build_evaluator` costs 725 s at CONUS. `LandUseRemap.fxy_*` is the same kind
+# of thing for the 0.05 deg land use. The capacity build needs those values
+# GATHERED per lane, so it takes them as runtime buffers instead, and the whole
+# regrid subtrees prune away. Combined with pruning to the reachable closure,
 # the capacity build's cost is a function of C alone, not of the real grid.
 # ===========================================================================
 module CapacityChem
 
 using Printf
 
-const LANE_VARS = ("Cap.apc", "Cap.bpc", "Cap.lat", "Cap.lon", "Cap.lev")
+const LANE_VARS = ("Cap.apc", "Cap.bpc", "Cap.dac", "Cap.dbc", "Cap.lat", "Cap.lon", "Cap.lev")
 # `param_coords = true` (tools/shard_chem.jl) replaces `Cap.lat`/`Cap.lon` with
 # the lane's grid INDICES, so the coordinate stays an expression over the
 # parameters -- see `capacity_doc`.
-const LANE_VARS_PC = ("Cap.apc", "Cap.bpc", "Cap.jidx", "Cap.iidx", "Cap.lev")
-const EMIS_E    = ("NEIRegrid.E_CO", "NEIRegrid.E_NO", "NEIRegrid.E_NO2",
-                   "NEIRegrid.E_ISOP", "NEIRegrid.E_FORM")
+const LANE_VARS_PC = ("Cap.apc", "Cap.bpc", "Cap.dac", "Cap.dbc", "Cap.jidx", "Cap.iidx", "Cap.lev")
+const NEI_SPECIES = ("CO", "NO", "NO2", "ISOP", "FORM")
+const NEI_PROFILES = ("ptegu", "ptnonipm", "pt_oilgas", "cmv")
+# the surface regrid (merged file + emln_othpt) and one per elevated profile group
+const EMIS_E    = (("NEIRegrid.E_$sp" for sp in NEI_SPECIES)...,
+                   ("NEIRegrid.E_$(sp)_$p" for sp in NEI_SPECIES for p in NEI_PROFILES)...)
+const LANDUSE_F = Tuple("LandUseRemap.fxy_$c" for c in ("urban", "agricultural", "range",
+    "deciduous", "coniferous", "mixedforest", "water", "barren", "wetland", "rangeag", "rockyshrubs"))
+# every build-time-folded [lon, lat] field the capacity build takes as a lane buffer
+const FOLDED_FIELDS = (EMIS_E..., LANDUSE_F...)
 const EMIS_EQS  = ("NEIRegrid.CO_emis", "NEIRegrid.NO_emis", "NEIRegrid.NO2_emis",
                    "NEIRegrid.ISOP_emis", "NEIRegrid.CH2O_emis")
+const PROFILE_EQS = Tuple("NEIRegrid.frac_$p" for p in NEI_PROFILES)
 
 # --------------------------------------------------------------------------- #
 # raw-document helpers. `EA.flattened_to_esm` hands back plain Dict/Vector data
@@ -215,9 +228,20 @@ function capacity_doc(doc::AbstractDict, C::Int; say = println, param_coords::Bo
                     ix("Transport3D.PS", "gi", "gj")])])])
         nsurg += 1
     end
+    # dp = dA[k] + dB[k] PS, the per-layer emission divisor: the same shape of
+    # surgery, with the layer's hybrid differences as lanes.
+    let eq = E[_need("Transport3D.dp")]
+        eq["rhs"]["args"] = Any["Cap.dac", "Cap.dbc", "Transport3D.PS"]
+        eq["rhs"]["expr"] = Dict{String,Any}("op" => "+", "args" => Any[ix("Cap.dac", "gi"),
+            Dict{String,Any}("op" => "*", "args" => Any[ix("Cap.dbc", "gi"),
+                ix("Transport3D.PS", "gi", "gj")])])
+        nsurg += 1
+    end
 
-    # --- 2. cos_sza_c: solar geometry from the lat/lon INDEX ----------------
-    let eq = E[_need("Transport3D.cos_sza_c")]
+    # --- 2. lat_c / lon_c (FastJX's lat/long) from the lat/lon INDEX ---------
+    for (nm, coord, cidx) in (("Transport3D.lat_c", "Transport3D.latp", "gj"),
+                              ("Transport3D.lon_c", "Transport3D.lonp", "gi"))
+        eq = E[_need(nm)]
         if param_coords
             # lat_j = lat0_deg + (j-1)*dlat_deg and lon_i = lon0_deg + (i-1/2)*dlon_deg
             # -- the lat_coord / lon_coord templates' formulas (the variable
@@ -232,26 +256,23 @@ function capacity_doc(doc::AbstractDict, C::Int; say = println, param_coords::Bo
                 Dict{String,Any}("op" => "*", "args" => Any[
                     Dict{String,Any}("op" => "-", "args" => Any[ix("Cap.iidx", "gi"), 0.5]),
                     "Transport3D.dlon_deg"])])
-            a = Ref(0); b = Ref(0)
+            a = Ref(0)
             rewrite!(eq["rhs"], node -> begin
                 node isa AbstractDict && get(node, "op", "") == "index" || return nothing
                 ar = node["args"]; length(ar) == 2 || return nothing
-                if ar[1] == "Transport3D.latp" && ar[2] == "gj"
-                    a[] += 1; return deepcopy(latx)
-                elseif ar[1] == "Transport3D.lonp" && ar[2] == "gi"
-                    b[] += 1; return deepcopy(lonx)
-                end
-                return nothing
+                ar[1] == coord && ar[2] == cidx || return nothing
+                a[] += 1
+                return deepcopy(cidx == "gj" ? latx : lonx)
             end)
-            a[] >= 1 && b[] >= 1 || error("capacity_doc: cos_sza_c no longer reads latp[gj]/lonp[gi] " *
-                                          "(got $(a[])/$(b[])); the solar chain changed")
-            eq["rhs"]["args"] = Any["Cap.jidx", "Cap.iidx"]
+            a[] >= 1 || error("capacity_doc: $nm no longer reads $coord[$cidx]; the " *
+                              "FastJX coordinate wiring changed")
+            eq["rhs"]["args"] = Any[cidx == "gj" ? "Cap.jidx" : "Cap.iidx"]
         else
-            a = swap_index!(eq["rhs"], "Transport3D.latp", "gj", "Cap.lat", "gi")
-            b = swap_index!(eq["rhs"], "Transport3D.lonp", "gi", "Cap.lon", "gi")
-            a >= 1 && b >= 1 || error("capacity_doc: cos_sza_c no longer reads latp[gj]/lonp[gi] " *
-                                      "(got $a/$b); the solar chain changed")
-            eq["rhs"]["args"] = Any["Cap.lat", "Cap.lon"]
+            lane = cidx == "gj" ? "Cap.lat" : "Cap.lon"
+            a = swap_index!(eq["rhs"], coord, cidx, lane, "gi")
+            a >= 1 || error("capacity_doc: $nm no longer reads $coord[$cidx]; the " *
+                            "FastJX coordinate wiring changed")
+            eq["rhs"]["args"] = Any[lane]
         end
         nsurg += 1
     end
@@ -279,8 +300,23 @@ function capacity_doc(doc::AbstractDict, C::Int; say = println, param_coords::Bo
         nsurg += 1
     end
 
-    # --- 5. lonc (the emissions time zone) and E_* (the NEI regrid) become
-    #        runtime buffers; both are constant in t, so nothing is lost.
+    # --- 4b. the elevated profile fractions are functions of the level ------
+    for nm in PROFILE_EQS
+        eq = E[_need(nm)]
+        hit = Ref(0)
+        eq["rhs"]["expr"] = rewrite!(eq["rhs"]["expr"], node -> begin
+            node isa AbstractString && node == "gk" || return nothing
+            hit[] += 1
+            return ix("Cap.lev", "gi")
+        end)
+        hit[] >= 1 || error("capacity_doc: $nm no longer depends on the level index `gk`")
+        push!(eq["rhs"]["args"], "Cap.lev")
+        nsurg += 1
+    end
+
+    # --- 5. lonc (the emissions time zone) and the build-time-folded regrids
+    #        (NEI E_*, land-use fxy_*) become runtime buffers; all are constant
+    #        in t, so nothing is lost.
     drop = Set{String}()
     if param_coords
         # keep `NEIRegrid.lonc = lon0_deg + (gi - 1/2)*dlon_deg` as an equation,
@@ -300,7 +336,7 @@ function capacity_doc(doc::AbstractDict, C::Int; say = println, param_coords::Bo
             nsurg += 1
         end
     end
-    for nm in (param_coords ? EMIS_E : ("NEIRegrid.lonc", EMIS_E...))
+    for nm in (param_coords ? FOLDED_FIELDS : ("NEIRegrid.lonc", FOLDED_FIELDS...))
         push!(drop, nm)
         haskey(V, nm) || error("capacity_doc: no variable `$nm`")
         shp = get(V[nm], "shape", Any["lon"])
@@ -342,7 +378,7 @@ function capacity_doc(doc::AbstractDict, C::Int; say = println, param_coords::Bo
                  nsurg, length(M["equations"]), nbefore, length(V), C))
     return d, (; C, closure = need,
                lane_arrays = collect(param_coords ? LANE_VARS_PC : LANE_VARS),
-               emis_arrays = collect(EMIS_E),
+               emis_arrays = collect(FOLDED_FIELDS),
                # under `param_coords` lonc is an EQUATION again, not a buffer
                lonc = param_coords ? "" : "NEIRegrid.lonc", variables = keep)
 end
@@ -387,7 +423,11 @@ function lane_buffers(meta, refparam::AbstractDict, C::Int)
                        "GEOS-FP forcing array")
     end
     for nm in meta.lane_arrays; pa[nm] = zeros(Float64, C); end
-    for nm in meta.emis_arrays; pa[nm] = zeros(Float64, C); end
+    # NEI E_* are read flat, E[(gj-1)*NLON + gi]; the land-use fxy_* are read
+    # [gi, gj], so they need the C x 1 lane grid's two axes.
+    for nm in meta.emis_arrays
+        pa[nm] = nm in LANDUSE_F ? zeros(Float64, C, 1) : zeros(Float64, C)
+    end
     isempty(meta.lonc) || (pa[meta.lonc] = zeros(Float64, C))
     return pa
 end
@@ -441,10 +481,13 @@ end
 """
     gather_geometry!(capbufs, meta, cells; Ap, Bp, latp, lonp, E, lonc)
 
-Fill the eight index-derived lane inputs. `Ap`/`Bp` are the reference hybrid
+Fill the index-derived lane inputs. `Ap`/`Bp` are the reference hybrid
 tables, `latp`/`lonp` the reference latitude/longitude coordinate vectors,
-`E` a name -> reference `E_*` vector map (flat `(j-1)*NLON + i`), and `lonc`
-the reference target-cell centre longitudes.
+`E` a name -> reference vector map of the build-time-folded fields (NEI `E_*`
+and land-use `fxy_*`, flat `(j-1)*NLON + i`), and `lonc` the reference
+target-cell centre longitudes. The layer differences `Ap[k] - Ap[k+1]` are
+bitwise the runner's `Transport3D.dA` const array (hybrid_coefs.json), so
+`Cap.dac`/`Cap.dbc` reproduce `dp` exactly.
 """
 function gather_geometry!(capbufs, meta, cells::Vector{NTuple{3,Int}};
                           Ap, Bp, latp, lonp, E::AbstractDict, lonc, nlon::Int)
@@ -452,6 +495,8 @@ function gather_geometry!(capbufs, meta, cells::Vector{NTuple{3,Int}};
     for (l, (i, j, k)) in enumerate(_filled(cells))
         capbufs["Cap.apc"][l] = Ap[k] + Ap[k + 1]
         capbufs["Cap.bpc"][l] = Bp[k] + Bp[k + 1]
+        capbufs["Cap.dac"][l] = Ap[k] - Ap[k + 1]
+        capbufs["Cap.dbc"][l] = Bp[k] - Bp[k + 1]
         if pc
             capbufs["Cap.jidx"][l] = j
             capbufs["Cap.iidx"][l] = i

@@ -237,19 +237,15 @@ end
 # the forcing silently freezes for the rest of the run. `ndays` must therefore
 # cover the run end plus one more tick -- `forcing_days_for` does that.
 #
-# Model time is seconds since 2016-01-01T00:00:00Z (the epoch the .esm's solar
-# chain also decomposes), so day d is EPOCH_DATE + d.
+# Model time is seconds since 2016-01-01T00:00:00Z, so day d is EPOCH_DATE + d.
+# The .esm carries the same epoch as the parameters Transport3D.t_ref (which
+# FastJX's solar position and the deposition season read as t + t_ref) and
+# NEIRegrid.t_ref; EPOCH_DATE here and those two defaults must agree.
 #
 # 2016, not 2013, so the meteorology year matches the NEI2016 emissions
 # inventory -- there is only one year of NEI, and running 2016 emissions under
 # 2013 weather would be a silent inconsistency of exactly the kind the
-# LON0/LAT0-vs-lon0_deg seam was made to prevent. The .esm's solar chain needs
-# NO change for this: it encodes the epoch as the literals doy0=1, hour0=0 and
-# then integrates `gamma_s = k*((doy0-1) + (hour0-12)/24 + t/86400)`, i.e.
-# elapsed days from Jan 1, never re-consulting the calendar -- and 2016-01-01 is
-# a Jan 1 like any other. The leap day is likewise irrelevant to the sun; it
-# only shifts which GEOS-FP FILE a given day index names, which the URL builder
-# below derives from the real calendar date and therefore gets right.
+# LON0/LAT0-vs-lon0_deg seam was made to prevent.
 # --------------------------------------------------------------------------- #
 const EPOCH_DATE = Dates.Date(2016, 1, 1)
 
@@ -286,6 +282,13 @@ function reseact_forcing(dir; ndays::Integer = 1, res::AbstractString = "4x5",
         "GEOSFP.OMEGA" => mk("A3dyn", "OMEGA", 5400.0, 10800.0, 8),
         "GEOSFP.PBLH"     => mk("A1", "PBLH", 1800.0, 3600.0, 24),
         "GEOSFP.T"        => mk("I3", "T", 0.0, 10800.0, 8),
+        # Specific humidity at the level and at 2 m, plus the 2 m temperature: the
+        # first-level midpoint height Zagl (DryDepositionGas.z) uses the mean of the
+        # level and 2 m virtual temperatures, as DepositionMTK.jl's
+        # first_level_midpoint_height does.
+        "GEOSFP.QV"       => mk("I3", "QV", 0.0, 10800.0, 8),
+        "GEOSFP.T2M"      => mk("A1", "T2M", 1800.0, 3600.0, 24),
+        "GEOSFP.QV2M"     => mk("A1", "QV2M", 1800.0, 3600.0, 24),
         # Relative humidity, A3dyn collection/cadence (NOT I3 -- so it blends with
         # w_A3). Feeds Transport3D.H2Oc -> FastJX.H2O and SuperFast.H2O. RH is what
         # the reference uses: GasChem.jl ext/EarthSciDataExt.jl derives H2O from
@@ -296,7 +299,8 @@ function reseact_forcing(dir; ndays::Integer = 1, res::AbstractString = "4x5",
         # AtmosphericDeposition.jl ext/EarthSciDataExt.jl does:
         #   dry: Ts<-A1.TS, z0<-A1.Z0M, u_star<-A1.USTAR, G<-A1.SWGDN,
         #        L<-MoninObhukov(rho,TS,USTAR,A1.HFLUX), rho_A<-P/(R T) MW_air,
-        #        del_P<-first_level_pressure_thickness(PS), z<-Z_agl
+        #        del_P<-first_level_pressure_thickness(PS),
+        #        z<-first_level_midpoint_height(PS,T,QV,T2M,QV2M)
         #   wet: cloudFrac<-A3cld.CLOUD, qrain<-(A3mstE.PFLCU+PFLLSAN)/Vdr/rho_air
         "GEOSFP.TS"       => mk("A1", "TS", 1800.0, 3600.0, 24),
         "GEOSFP.Z0M"      => mk("A1", "Z0M", 1800.0, 3600.0, 24),
@@ -341,6 +345,36 @@ function reseact_forcing(dir; ndays::Integer = 1, res::AbstractString = "4x5",
     for sp in ("NO", "NO2", "CO", "ISOP", "FORM")
         providers["NEI2016Emis.flux_$sp"] = EarthSciIO.const_provider(
             cache, nei_url; format = "netcdf", variables = [sp])
+    end
+    # The six inline point sectors (NEI2016Elevated, EarthSciModels
+    # nei2016_elevated.esm), same grid and units as the merged file. NEIRegrid
+    # adds emln_othpt to the surface layer and spreads the other five over the
+    # column by GEOS-Chem's vertical profiles.
+    for (sector, short) in (("emln_ptegu", "ptegu"), ("emln_ptnonipm", "ptnonipm"),
+                            ("emln_pt_oilgas", "pt_oilgas"), ("emln_othpt", "othpt"),
+                            ("emln_cmv_c3_12", "cmv_c3"), ("emln_cmv_c1c2_12", "cmv_c1c2"))
+        url_s = replace(nei_url, nei_sector => sector)
+        for sp in ("NO", "NO2", "CO", "ISOP", "FORM")
+            providers["NEI2016Elevated.flux_$(sp)_$short"] = EarthSciIO.const_provider(
+                cache, url_s; format = "netcdf", variables = [sp])
+        end
+    end
+
+    # --- Wesely land use ------------------------------------------------------
+    # The 0.05 deg MODIS class percentages of EarthSciModels wesely_landuse.esm,
+    # one class per provider. CONST, for the same reason the NEI map is: the
+    # area-average onto the model grid (LandUseRemap) folds to a [lon, lat]
+    # array at build time. The class axis is selected with `indices` (EarthSciIO
+    # does not take the spec's `fixed`), which keeps it as a length-1 axis.
+    lu_url = "https://raw.githubusercontent.com/jialinl6/DepositionMTK.jl/" *
+             "cbe7d7db0a86bd6945f6b06d1fdc8274399b33de/data/landuse_wesely_conus_0p05.nc"
+    for (c, name) in enumerate(("urban", "agricultural", "range", "deciduous", "coniferous",
+                                "mixedforest", "water", "barren", "wetland", "rangeag",
+                                "rockyshrubs"))
+        providers["WeselyLandUse.f_$name"] = EarthSciIO.const_provider(
+            cache, lu_url; format = "netcdf", variables = ["percent"],
+            reader_kwargs = Dict{Symbol,Any}(
+                :select => Dict("axes" => Any[Dict("indices" => [c - 1]), "all", "all"])))
     end
 
     co = JSON3.read(read(joinpath(dir, "hybrid_coefs.json"), String))
@@ -435,10 +469,14 @@ function native_slice(; res::AbstractString = "4x5",
             # array shape drives it, verified by tools/diag/native_window_probe.jl
             # -- but a declaration that contradicts the data is exactly the kind
             # of seam this function exists to close.
+            # LU_WX/LU_WY size LandUseRemap's per-cell window: the 0.05 deg
+            # land-use columns/rows one model cell can touch.
             metaparameters = Dict("NLON" => nlon, "NLAT" => nlat,
                                   "NLEV" => Int(nlev),
                                   "LON0" => lon0, "LAT0" => lat0,
-                                  "GF_NLON" => g.nlon, "GF_NLAT" => g.nlat),
+                                  "GF_NLON" => g.nlon, "GF_NLAT" => g.nlat,
+                                  "LU_WX" => ceil(Int, g.dlon / 0.05 - 1e-9) + 1,
+                                  "LU_WY" => ceil(Int, g.dlat / 0.05 - 1e-9) + 1),
             # NEIRegrid is the FOURTH consumer of this origin (see the note
             # above): it builds the target polygon rings the emissions are
             # clipped onto, and if its copy disagreed the inventory would land
@@ -451,7 +489,15 @@ function native_slice(; res::AbstractString = "4x5",
                               "NEIRegrid.lon0_deg" => lon0_deg,
                               "NEIRegrid.lat0_deg" => lat0_deg,
                               "NEIRegrid.dlon_deg" => g.dlon,
-                              "NEIRegrid.dlat_deg" => g.dlat),
+                              "NEIRegrid.dlat_deg" => g.dlat,
+                              # the elevated profiles fold at the domain top
+                              "NEIRegrid.ktop" => Float64(nlev),
+                              # LandUseRemap is the FIFTH consumer: the cells it
+                              # area-averages the land use onto
+                              "LandUseRemap.lon0_deg" => lon0_deg,
+                              "LandUseRemap.lat0_deg" => lat0_deg,
+                              "LandUseRemap.dlon_deg" => g.dlon,
+                              "LandUseRemap.dlat_deg" => g.dlat),
             # human-readable extent, for logging a run's actual footprint
             lon_deg = (g.lon_first + g.dlon * lon0,
                        g.lon_first + g.dlon * (lon0 + nlon - 1)),
@@ -546,6 +592,82 @@ function hydrostatic_dp(merged_param::AbstractDict, const_arrays::AbstractDict, 
     end
 end
 
+# --------------------------------------------------------------------------- #
+# Data-fed parameters nothing reads.
+#
+# reseact mounts whole data components -- NEI2016Emis (69 species),
+# NEI2016Elevated (348 fields), GEOSFP -- and feeds only the fields the model
+# reads. EarthSciAST from 04d471203 (2026-09-29) refuses to build a data-fed
+# parameter with no default that nothing supplies (E_TREEWALK_MISSING_DATA),
+# whether or not any equation reads it. `unread_data_params` names the ones no
+# equation reaches, and `bind_unread_data!` binds them to 0.0 -- every build of
+# the split model calls it, `build_split_run` and the runners that call
+# `EA.build_evaluator` themselves. One that IS read is left alone, so a genuinely
+# missing provider is still refused, by name. (The capacity builds need nothing:
+# `capacity_doc` prunes the document to what the chemistry reads.)
+# --------------------------------------------------------------------------- #
+function _names_in!(acc::Vector{String}, e)
+    if e isa AbstractString
+        push!(acc, e)
+    elseif e isa AbstractDict
+        for k in ("args", "expr", "expr_body", "body")
+            haskey(e, k) && _names_in!(acc, e[k])
+        end
+        if haskey(e, "bindings") && e["bindings"] isa AbstractDict
+            for (_, v) in e["bindings"]; _names_in!(acc, v); end
+        end
+    elseif e isa AbstractVector
+        for a in e; _names_in!(acc, a); end
+    end
+    return acc
+end
+
+function unread_data_params(doc::AbstractDict, bound)
+    M = doc["models"]["Flattened"]
+    obsdef = Dict{String,Any}(); stack = String[]
+    for eq in M["equations"]
+        l = get(eq, "lhs", nothing)
+        if l isa AbstractString
+            haskey(obsdef, l) || (obsdef[l] = eq["rhs"])
+        else                                   # a derivative: a root of the RHS
+            _names_in!(stack, eq["rhs"]); _names_in!(stack, l)
+        end
+    end
+    need = Set{String}()
+    while !isempty(stack)
+        n = pop!(stack)
+        n in need && continue
+        push!(need, n)
+        haskey(obsdef, n) && _names_in!(stack, obsdef[n])
+    end
+    out = String[]
+    for (k, v) in M["variables"]
+        get(v, "type", "") == "parameter" || continue
+        haskey(v, "default") && continue
+        upd = get(v, "update", nothing); upd === nothing && continue
+        any(r -> r isa AbstractDict && get(r, "kind", "") == "data",
+            upd isa AbstractVector ? upd : Any[upd]) || continue
+        (k in need || any(b -> haskey(b, k), bound)) && continue
+        push!(out, String(k))
+    end
+    return out
+end
+
+"""
+    bind_unread_data!(overrides, docs, const_arrays, param_arrays; say = println)
+
+Bind every data-fed parameter that no equation of `docs` reads, and that nothing
+in `overrides` / `const_arrays` / `param_arrays` supplies, to 0.0 in `overrides`.
+See `unread_data_params`.
+"""
+function bind_unread_data!(overrides, docs, const_arrays, param_arrays; say = println)
+    unread = unique(vcat([unread_data_params(d, (overrides, const_arrays, param_arrays))
+                          for d in docs]...))
+    for k in unread; overrides[k] = 0.0; end
+    isempty(unread) || say("    unread data-fed parameters bound to 0: $(length(unread))")
+    return overrides
+end
+
 function build_split_run(docs, tspan; providers = nothing,
                          parameters::AbstractDict = Dict{String,Float64}(),
                          const_arrays::AbstractDict = Dict{String,Any}(),
@@ -579,6 +701,8 @@ function build_split_run(docs, tspan; providers = nothing,
             end
         end
     end
+
+    bind_unread_data!(overrides, docs, merged_const, merged_param)
 
     # --- build each part over the shared buffers, each with its own discrete
     #     materializer (state-free derived caches differ per part). Per-part timing +

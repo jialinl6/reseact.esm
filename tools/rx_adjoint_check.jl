@@ -128,6 +128,7 @@ Logging.with_logger(Logging.NullLogger()) do
     end
     ov = Dict{String,Float64}(String(k) => Float64(v) for (k, v) in ff.parameters)
     merge!(ov, Dict{String,Float64}(k => Float64(v) for (k, v) in SLICE.parameters))
+    bind_unread_data!(ov, docs, merged_const, merged_param; say = say)
     for i in 1:2
         dms[i] = EA.DiscreteMaterializer()
         fi, u0i, pi, _, vmi = EA.build_evaluator(docs[i]; form = :oop,

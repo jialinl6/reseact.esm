@@ -107,7 +107,8 @@ using LinearAlgebra, Printf, Statistics
 # Zarr sink's default :diagnostic profile is Blosc-zstd, and loading Blosc is what
 # activates EarthSciIOBloscExt to supply the encode. Without it sink_flush! throws.
 using Blosc
-# Polyester activates EarthSciASTPolyesterExt, the THREADED codegen tier. It is a
+# Polyester activates EarthSciASTPolyesterExt, the THREADED codegen tier (on
+# EarthSciAST before 2026-10-03; later versions always carry the tier). It is a
 # weakdep, so `using` it is the whole activation -- and it is worth ~10x on a long
 # run, which is too large a difference to leave to whether the caller remembered.
 # Loaded before the build, because the tier has to be live when the kernels are
@@ -166,9 +167,11 @@ const T_END = T0 + SOLVE_SECS
 const RTOL, ATOL, ATOL_T = 1e-4, 1e-9, 1e-6
 const LU = LinearSolve.LUFactorization()
 
-# The model's own solar chain, mirrored here ONLY to label the output rows with
-# the sun angle the run is actually seeing (Transport3D.cos_sza_c is an internal
-# observed, not a state, so it is not in `u`). Same constants, same formulas.
+# FastJX's solar chain (NOAA Spencer, as GasChem's FastJX), mirrored here ONLY to
+# label the output rows with the sun angle the run is seeing (FastJX's cosSZA is
+# an internal observed, not a state, so it is not in `u`). Same constants and
+# formulas, with the hour taken continuously where FastJX reads the clock in
+# whole seconds; the label is the domain centre's.
 const K_GAMMA, D2R = 0.01721420632103996, 0.017453292519943295
 # The digest's cos_sza column labels ONE point -- the domain centre -- so a wider
 # slice does not go on being described by the sun over the middle of the old one.
@@ -192,8 +195,12 @@ say(@sprintf("    slice: lon %.1f..%.1f, lat %.1f..%.1f (native origin %d,%d); f
     SLICE.lon0, SLICE.lat0, NDAYS))
 # Threading is the difference between ~40x realtime and ~1:1, so say which one
 # this process is going to be BEFORE spending hours in it.
+# EarthSciAST up to 2026-10-03 ships the tier as the EarthSciASTPolyesterExt
+# weakdep extension; from e278a0183 on Polyester is a hard dependency and the
+# tier is always built in, so either form counts.
 let nt = Threads.nthreads(),
-    ext = POLYESTER_OK && Base.get_extension(EA, :EarthSciASTPolyesterExt) !== nothing
+    ext = POLYESTER_OK && (Base.get_extension(EA, :EarthSciASTPolyesterExt) !== nothing ||
+                           isdefined(EA, :Polyester))
     say(@sprintf("    threads=%d  polyester_ext=%s", nt, ext))
     (nt > 1 && ext) ||
         say("    !! SLOW CONFIGURATION -- the threaded codegen tier is off. Relaunch " *

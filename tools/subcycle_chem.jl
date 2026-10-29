@@ -188,11 +188,11 @@ function reference_geometry(insp, pR, mconst, mp)
         d <= 1e-9 * max(1.0, maximum(abs, want)) || error(@sprintf("reference_geometry: `%s` from the build differs from the coordinate formula by %.3e; the template changed and the lane gather would put cells at the wrong coordinates", nm, d))
     end
     E = Dict{String,Vector{Float64}}()
-    for nm in CapacityChem.EMIS_E
+    for nm in CapacityChem.FOLDED_FIELDS
         v = insp_array(insp, nm)
         v === nothing && error("subcycle: `$nm` is not in the build inspection -- the " *
-                               "NEI regrid is const-folded, so a capacity build cannot " *
-                               "be given its values without one")
+                               "NEI and land-use regrids are const-folded, so a capacity " *
+                               "build cannot be given their values without one")
         length(v) == nlon * nlat ||
             error("subcycle: $nm has length $(length(v)), expected $(nlon*nlat)")
         E[nm] = v

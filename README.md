@@ -53,6 +53,25 @@ the runner's default and projects to about 2 h of loop.
   | `EarthSciDiscretizations` | `main` (`grids/latlon3d/`, `regridding/`, `reprojection/` identical on `main` and the `a9a7c3d` branch the runs used) | PPM stencil rules referenced by the model |
   | `EarthSciModels` | `main` ≥ `8a25818` (runs used `bf9a7e3`, which contains it) | GEOS-FP, NEI2016, SuperFast, Fast-JX, deposition components |
 
+  **Since the 2026-10-28 stack sync** the model no longer runs on that EarthSciModels
+  state: it binds the synced components (Fast-JX computing its own solar position,
+  the 11-class Wesely land-use mosaic, the elevated NEI2016 sectors), which are on
+  the `sync_emissions` branch of `jialinl6/EarthSciModels` until they merge. It also
+  carries an `operator_compose` `translate` map that EarthSciAST requires from
+  2026-09-07 on. Checked with the native runner (7x7x8, 10 min) on EarthSciAST
+  `17c57b5bc` (2026-09-29, v0.2.0) and on `2f5e8a94d` (2026-10-28, v0.6.0), with
+  EarthSciIO `e792c3f`; the two give the same digest to every printed digit. v0.6.0
+  needs EarthSciASTSplitter's `EarthSciAST` compat widened past `0.1, 0.2` (its code
+  is unchanged; `4d74456` with the widened compat was used). Two runner details
+  this depends on: data-fed parameters no equation reads (the NEI species SuperFast
+  does not use, ~400 of them) are bound to 0, since EarthSciAST from `04d471203`
+  refuses an unsupplied one (`bind_unread_data!` in split_common.jl); and
+  `build_evaluator`, which every runner builds through, is deprecated in v0.6.0 and
+  goes in the next minor release (`esm_problem` replaces it). On the same machine
+  the v0.6.0 build took as long as v0.2.0's (88 s vs 100 s) but the 10-minute solve
+  took 657 s against 49 s -- not yet investigated. The results above ran on the
+  pre-sync model.
+
   The runner's provenance block prints exactly these for any run, so compare against
   it rather than this table when in doubt. `tools/diag/provenance/` keeps the patch
   that was uncommitted in EarthSciASTDiff at the time of the 48 h runs (now `7f83c11`, compat widened in `0bd517f`).

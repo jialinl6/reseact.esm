@@ -1,10 +1,13 @@
 # The SYMBOLIC block Jacobian, as something a TRACED consumer can call.
 #
-# EarthSciASTDiff's `prepare_jacobian` returns a `JacobianEvaluator` whose call
-# operator is HOST-ONLY by construction: it scatters `u` into a persistent
-# buffer (`jac.uj[s] = u[i]`), calls the band model, then accumulates into a
-# `SparseMatrixCSC`'s `nzval` (`J.nzval[pos] += duj[slot]`). Mutation of host
-# scratch, a sparse container, and a scatter -- none of which trace.
+# The band program (`BandProgram`, tools/rx_band_program.jl, built from
+# EarthSciASTDiff's evaluation document) is placed into a matrix by a HOST-ONLY
+# assembly: scatter `u` into a band state (`uj[umap[i]] = u[i]`), call the band
+# model, then accumulate into a `SparseMatrixCSC`'s `nzval`
+# (`J.nzval[pos] += duj[slot]`). That is exactly what EarthSciASTDiff's
+# `JacobianEvaluator` call operator did before 0.3 removed it, and the fields
+# below keep its names. Mutation of host scratch, a sparse container, and a
+# scatter -- none of which trace.
 #
 # Everything it does is nevertheless a STATIC permutation, known once the model
 # is built. This module turns that permutation inside out into the two GATHERS a
@@ -16,7 +19,7 @@
 #               gather `uj[k] = u[gidx[k]]` with gidx[k] = 0 where no state
 #               feeds slot k. Padding `u` with a leading 0.0 makes 0 a legal
 #               index, so the whole map is ONE gather with no branch -- and the
-#               host operator leaves exactly those slots at 0.0 too
+#               host assembly leaves exactly those slots at 0.0 too
 #               (`jac.uj = zeros(...)`, only umap positions overwritten), so the
 #               pad reproduces host semantics rather than approximating them.
 #   duj -> Jb : `jac.scatter` is a list of (band slot, nzval position). Inverted
@@ -37,11 +40,12 @@
 # WHAT THIS MODULE REFUSES TO DO SILENTLY. The plan is only valid if the
 # Jacobian really is block-diagonal by cell with a uniform per-cell pattern, and
 # if the Jacobian's state ordering is the one the runner compiles. Neither is
-# guaranteed -- `prepare_jacobian` REBUILDS the model from the raw
-# FlattenedSystem while the runner compiles the esm-converted document, so two
-# builds and two var maps -- and a mismatch would put every band in the wrong
-# cell with no visible symptom. `block_jac_plan` therefore CHECKS all of it and
-# throws; it never falls back.
+# guaranteed -- the band model is a SEPARATE build (of the evaluation document,
+# from the raw FlattenedSystem) while the runner compiles the esm-converted
+# document, so two builds and two var maps -- and a mismatch would put every
+# band in the wrong cell with no visible symptom. `band_program` lifts by NAME
+# and lays the matrix out over the runner's own var map; `block_jac_plan`
+# CHECKS the rest and throws; neither ever falls back.
 module RxSymBlockJac
 
 using Reactant
@@ -81,8 +85,10 @@ end
 """
     block_jac_plan(jac; runner_names = nothing)
 
-Build the traced gather plan from a prepared `JacobianEvaluator`. Throws with a
-specific message if any precondition for a per-cell block Jacobian fails.
+Build the traced gather plan from a `BandProgram` (tools/rx_band_program.jl),
+or anything carrying its `rownames`, `umap`, `uj`, `scatter` and `prototype`.
+Throws with a specific message if any precondition for a per-cell block
+Jacobian fails.
 
 `runner_names` is the state-name vector the CONSUMER compiles (in its own index
 order). When given, it is checked position by position against `jac.rownames`;
@@ -238,7 +244,7 @@ end
     sym_block_jac(plan, gjb)
 
 The `(u, p, t, bufs) -> Jb` the integrator's `symjac` hook wants, given the band
-model in its 4-ARGUMENT form (`rx_rhs(jac.fJ!)`, i.e.
+model in its 4-ARGUMENT form (`rx_rhs(band.fJ)`, i.e.
 `direct_rhs_with_buffers`). The 4-arg form is not optional: the 3-arg form
 resolves forcing internally, which BAKES the meteorology in as constants.
 """
@@ -248,27 +254,33 @@ sym_block_jac(plan::BlockJacPlan, gjb) =
 """
     validate_plan(plan, jac, u, p, t; eval_band)
 
-Check the gather plan against EarthSciASTDiff's OWN index algebra at one point,
-and return the worst relative difference over every block entry. Zero is the
-expected answer -- the two are permutations of the same numbers, so anything
+Check the gather plan against the band program's HOST index algebra at one
+point, and return the worst relative difference over every block entry. Zero is
+the expected answer -- the two are permutations of the same numbers, so anything
 nonzero is an index error, not roundoff.
 
 `eval_band` is a host callable `uj -> duj::Vector{Float64}` for the band model,
-normally `rx_host_eval(jac.fJ!, p, t, bufs)`. It is called TWICE, on two
+normally `rx_host_eval(band.fJ, p, t, bufs)`. It is called TWICE, on two
 independently built band states:
 
-  * `jac.umap` scattered from `u` -- the evaluator's own lift. Its output is
-    read through `jac.scatter` into `jac.prototype`, which is exactly the
-    assembly `jac(J, u, p, t)` performs, and is the REFERENCE.
+  * `jac.umap` scattered from `u` -- the band program's name-matched lift. Its
+    output is read through `jac.scatter` into `jac.prototype`, which is the
+    host assembly (EarthSciASTDiff's bound `Csr` plan, placed on
+    `jacobian_pattern`'s pattern; see tools/rx_band_program.jl), and is the
+    REFERENCE.
   * `plan.ugather` applied to `u` -- the plan's own lift, the one
     [`gather_uj`](@ref) emits into the traced program. Its output is read
     through `plan.blocks`.
 
 So both halves of the plan -- the state lift AND the band-to-block gather -- are
-compared against the evaluator's, which is what makes this the check standing
-between a transposed gather and a plausible gradient that is wrong everywhere.
-The band model is EVALUATED once per lift rather than assumed: a plan whose
-`ugather` is wrong feeds the program a different state, and that shows up here.
+compared against the host assembly's, which is what makes this the check
+standing between a transposed gather and a plausible gradient that is wrong
+everywhere. The band model is EVALUATED once per lift rather than assumed: a plan
+whose `ugather` is wrong feeds the program a different state, and that shows up
+here. (Before EarthSciASTDiff 0.3 the reference was its own `JacobianEvaluator`;
+the scatter it is now read through is assembled in this repository, which is
+why `band_program` cross-checks that scatter against `jacobian_pattern` and
+throws on any disagreement before this function ever runs.)
 
 The evaluation is a compiled one because an `:oop` build product is compiled IR
 and raises `E_TREEWALK_OOP_NOT_EVALUABLE` when called on host arrays; see
@@ -301,8 +313,8 @@ function validate_plan(plan::BlockJacPlan, jac, u, p, t; eval_band)
         "would report a WORST ERROR OF 0.0 and the run would proceed on an " *
         "all-zero Jacobian.")
 
-    # (a) the REFERENCE: the evaluator's own lift, and the assembly its call
-    #     operator performs on the result.
+    # (a) the REFERENCE: the band program's own lift, and the host assembly
+    #     its scatter performs on the result.
     ujh = zeros(plan.NJ)
     for (i, s) in enumerate(jac.umap)
         ujh[s] = u[i]

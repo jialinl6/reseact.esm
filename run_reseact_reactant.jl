@@ -243,6 +243,7 @@ end
 include(joinpath(RXDIR, "rx_traced_integrator.jl"))
 include(joinpath(RXDIR, "rx_sym_block_jac.jl")); using .RxSymBlockJac
 include(joinpath(REPO, "tools", "rx_rhs.jl"))   # the compiled-RHS seam
+include(joinpath(REPO, "tools", "rx_band_program.jl"))   # RXJAC=sym's band program
 say(rx_rhs_banner())
 
 # The kernel-class merge runs INSIDE EarthSciAST's build (src/tree_walk/oop_merge.jl),
@@ -293,32 +294,39 @@ const SYMJAC = JACMODE === :sym
 # needed an EarthSciAST run-model-jl could not resolve -- and the esm 1.0.0
 # migration closed that: run-model-jl develops all four packages at their release
 # versions, so `sym` needs no special environment and no pinned corpus.
-PLAN = gjbJ = host_bufsJ = dev_bufsJ = jacE = nothing
+#
+# THE BAND PROGRAM IS BUILT HERE, NOT BY EarthSciASTDiff, since 0.3 removed
+# `prepare_jacobian` (tools/rx_band_program.jl says what replaced it). It is
+# built over the SAME split part, overrides and live buffers as part 2's RHS,
+# and WITH ITS OWN DiscreteMaterializer, as both RHS halves are: without one,
+# LandUseRemap's 11 land-use fractions stay inline as whole-array sums over the
+# MODIS cells in a model cell, which the direct emitter refuses at 4x5 and
+# 2x2.5. `refresh_forcing` re-materializes it with the RHS halves.
+PLAN = gjbJ = host_bufsJ = dev_bufsJ = BAND = nothing
 if SYMJAC
-    @eval using EarthSciASTDiff
     tj = time()
-    jacE = Logging.with_logger(Logging.NullLogger()) do
-        EarthSciASTDiff.prepare_jacobian(splitparts[2]; wrt = :states,
-            build_kwargs = (; form = :oop, parameter_overrides = ov,
-                              const_arrays = merged_const, param_arrays = merged_param))
+    BAND = Logging.with_logger(Logging.NullLogger()) do
+        band_program(splitparts[2]; source_layout = (u0 = u0, p = p, var_map = var_map),
+            build_kwargs = (; parameter_overrides = ov, const_arrays = merged_const,
+                              param_arrays = merged_param,
+                              materialize_out = EA.DiscreteMaterializer()))
     end
-    say(@sprintf("  prepare_jacobian %.1f s   structure=%s  oop=%s",
-                 time() - tj, jacE.structure, jacE.oop))
-    jacE.oop || error("RXJAC=sym: the band model came back IN-PLACE; it captures " *
-                      "host scratch per node and cannot be traced")
-    # indexes by POSITION, and the two var maps come from independent builds
-    PLAN = block_jac_plan(jacE; runner_names = first.(sort(collect(var_map), by = last)))
-    gjbJ = rx_rhs(jacE.fJ!)
-    host_bufsJ = rx_bufs(jacE.fJ!)
+    say(@sprintf("  band program %.1f s (document %.1f, build %.1f, pattern %.1f, scatter %.1f)   %s",
+                 time() - tj, BAND.timings.doc, BAND.timings.build, BAND.timings.pattern,
+                 BAND.timings.scatter, BAND))
+    # indexes by POSITION, and the band model is a separate build with its own var map
+    PLAN = block_jac_plan(BAND; runner_names = first.(sort(collect(var_map), by = last)))
+    gjbJ = rx_rhs(BAND.fJ)
+    host_bufsJ = rx_bufs(BAND.fJ)
     say("  $PLAN   band buffers=$(length(host_bufsJ))")
-    # A check of the BUILD: the plan's two gathers against the scatter map
-    # EarthSciASTDiff assembles from. It costs one @compile of the band program
-    # and two device calls, because an `:oop` build product is compiled IR and
-    # cannot be called on host arrays.
+    # A check of the BUILD: the plan's two gathers against the host assembly
+    # from EarthSciASTDiff's bound scatter plan. It costs one @compile of the
+    # band program and two device calls, because an `:oop` build product is
+    # compiled IR and cannot be called on host arrays.
     let tv = time(),
-        w = validate_plan(PLAN, jacE, u0, p, T0;
-                          eval_band = rx_host_eval(jacE.fJ!, p, T0, host_bufsJ))
-        say(@sprintf("  plan vs the JacobianEvaluator: worst relative %.3e  %s  (%.1f s)",
+        w = validate_plan(PLAN, BAND, u0, p, T0;
+                          eval_band = rx_host_eval(BAND.fJ, p, T0, host_bufsJ))
+        say(@sprintf("  plan vs the bound scatter: worst relative %.3e  %s  (%.1f s)",
                      w, w <= 1e-12 ? "PASS" : "FAIL", time() - tv))
         w <= 1e-12 || error("RXJAC=sym: the gather plan does not reproduce the Jacobian")
     end
@@ -377,7 +385,7 @@ function push_forcing!()
     for i in 1:2; rx_sync!(dev_bufs[i], fo[i]); end
     # miss this and the Jacobian freezes at the T0 epoch while the RHS advances:
     # a wrong Jacobian that still converges, which is the worst kind.
-    SYMJAC && rx_sync!(dev_bufsJ, jacE.fJ!)
+    SYMJAC && rx_sync!(dev_bufsJ, BAND.fJ)
     return nothing
 end
 push_forcing!()
@@ -451,6 +459,9 @@ function refresh_forcing(t)
         merged_param[k] .= EA._provider_const_field(EA.provider_sample(prov, t), k)
     end
     foreach(d -> d.materialize!(), dms)
+    # the band program's materialized fields are derived from the same arrays;
+    # skip this and they stay at the T0 epoch while the RHS halves' advance.
+    SYMJAC && BAND.dmJ.materialize!()
     push_forcing!()
 end
 

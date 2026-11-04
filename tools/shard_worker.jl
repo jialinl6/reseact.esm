@@ -54,10 +54,11 @@ include(joinpath(RXDIR, "rx_sym_block_jac.jl"))
 using .RxSymBlockJac
 include(joinpath(REPO, "tools", "capacity_chem.jl")); using .CapacityChem
 include(joinpath(REPO, "tools", "rx_rhs.jl"))   # the compiled-RHS seam
+include(joinpath(REPO, "tools", "rx_band_program.jl"))   # the band Jacobian's build
 
-# ShardKernel reads CapacityChem / RxTracedIntegrator / RxSymBlockJac / RxRHS and
-# the split_common top-levels off its parent module, which is this `Main`, so
-# every one of them must be loaded above this line. `RxRHS` is the compiled-RHS
+# ShardKernel reads CapacityChem / RxTracedIntegrator / RxSymBlockJac / RxRHS /
+# RxBandProgram and the split_common top-levels off its parent module, which is
+# this `Main`, so every one of them must be loaded above this line. `RxRHS` is the compiled-RHS
 # seam: the shard's chemistry programs and its band Jacobian are emitted by the
 # same direct StableHLO emitter the driver's are, and `build!` prints the lane
 # banner on the shard's own first line so a worker that resolved a different

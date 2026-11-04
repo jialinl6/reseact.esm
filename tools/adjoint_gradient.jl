@@ -402,6 +402,7 @@ const RTI = RxTracedIntegrator
 include(joinpath(RXDIR, "rx_sym_block_jac.jl"))
 using .RxSymBlockJac
 include(joinpath(REPO, "tools", "rx_rhs.jl"))   # the compiled-RHS seam
+include(joinpath(REPO, "tools", "rx_band_program.jl"))   # jac=:sym's band program
 say(rx_rhs_banner())
 
 host_bufs = [rx_bufs(fo[i]) for i in 1:2]
@@ -433,47 +434,49 @@ say("  NS=$NS species, NC=$NC cells, N=$N states")
 # stays a runtime operand there too rather than being baked into the program.
 # They are built from the same `merged_param` dict the RHS uses, which is what
 # makes `refresh_forcing` reach them.
+#
+# Since EarthSciASTDiff 0.3 the band model is built HERE (`band_program`,
+# tools/rx_band_program.jl; 0.3 removed `prepare_jacobian`), WITH ITS OWN
+# DiscreteMaterializer as both RHS halves have one: without it LandUseRemap's
+# 11 land-use fractions stay inline as whole-array sums, which the direct
+# emitter refuses at 4x5 and 2x2.5. `refresh_forcing` re-materializes it.
 const JACMODE = Symbol(get(ENV, "RESEACT_ADJ_JAC", "sym"))
 JACMODE in (:sym, :fd, :ad) || error("RESEACT_ADJ_JAC must be sym, fd or ad")
 const SYMJAC = JACMODE === :sym
-PLAN = gjbJ = host_bufsJ = dev_bufsJ = nothing
+PLAN = gjbJ = host_bufsJ = dev_bufsJ = BAND = nothing
 if SYMJAC
-    @eval using EarthSciASTDiff
     tj = time()
-    jacE = Logging.with_logger(Logging.NullLogger()) do
-        # `source_layout` skips the SOURCE-model rebuild inside prepare_jacobian
-        # -- ~half its wall time on a real grid, and a share that GROWS with the
-        # grid. The layout below is the part-2 build from the block above: same
-        # split part, same overrides/const_arrays/param_arrays, which is exactly
-        # the contract the kwarg asks for. (`var_map` is asserted identical
-        # across the two parts there; wrt = :states never reads `p`.)
-        EarthSciASTDiff.prepare_jacobian(splitparts[2]; wrt = :states,
-            build_kwargs = (; form = :oop, parameter_overrides = ov,
-                              const_arrays = merged_const, param_arrays = merged_param),
-            source_layout = (u0 = u0, p = p, var_map = var_map))
+    BAND = Logging.with_logger(Logging.NullLogger()) do
+        # The layout is the part-2 build from the block above: same split part,
+        # same overrides/const_arrays/param_arrays, which is the contract
+        # `source_layout` asks for, and the var map the plan's matrix is laid
+        # out over. (`var_map` is asserted identical across the two parts there.)
+        band_program(splitparts[2]; source_layout = (u0 = u0, p = p, var_map = var_map),
+            build_kwargs = (; parameter_overrides = ov, const_arrays = merged_const,
+                              param_arrays = merged_param,
+                              materialize_out = EA.DiscreteMaterializer()))
     end
-    say(@sprintf("  prepare_jacobian %.1f s   structure=%s  oop=%s",
-                 time() - tj, jacE.structure, jacE.oop))
-    jacE.oop || error("jac=:sym: the band model came back IN-PLACE; it captures " *
-                      "host scratch per node and cannot be traced")
+    say(@sprintf("  band program %.1f s (document %.1f, build %.1f, pattern %.1f, scatter %.1f)   %s",
+                 time() - tj, BAND.timings.doc, BAND.timings.build, BAND.timings.pattern,
+                 BAND.timings.scatter, BAND))
     # `runner_names` costs nothing and would otherwise be a silent catastrophe:
     # two independent builds, two var maps, and a plan that indexes by POSITION.
-    PLAN = block_jac_plan(jacE;
+    PLAN = block_jac_plan(BAND;
                           runner_names = first.(sort(collect(var_map), by = last)))
-    gjbJ = rx_rhs(jacE.fJ!)
-    host_bufsJ = rx_bufs(jacE.fJ!)
+    gjbJ = rx_rhs(BAND.fJ)
+    host_bufsJ = rx_bufs(BAND.fJ)
     say("  $PLAN   band buffers=$(length(host_bufsJ))")
-    # The plan is pure index algebra, so it is checkable against the scatter map
-    # EarthSciASTDiff assembles its own sparse Jacobian from -- and it is the only
+    # The plan is pure index algebra, so it is checkable against the host
+    # assembly from EarthSciASTDiff's bound scatter plan -- and it is the only
     # thing standing between a transposed gather and a plausible gradient that is
     # wrong everywhere. It needs the band model evaluated at two points, which
     # costs one @compile of the band program (the smallest of the four this
     # driver builds) and two device calls; the `:oop` build product itself is
     # compiled IR and cannot be called on host arrays.
     let tv = time(),
-        w = validate_plan(PLAN, jacE, u0, p, T0;
-                          eval_band = rx_host_eval(jacE.fJ!, p, T0, host_bufsJ))
-        say(@sprintf("  plan vs the JacobianEvaluator: worst relative %.3e  %s  (%.1f s)",
+        w = validate_plan(PLAN, BAND, u0, p, T0;
+                          eval_band = rx_host_eval(BAND.fJ, p, T0, host_bufsJ))
+        say(@sprintf("  plan vs the bound scatter: worst relative %.3e  %s  (%.1f s)",
                      w, w <= 1e-12 ? "PASS" : "FAIL", time() - tv))
         w <= 1e-12 || error("jac=:sym: the gather plan does not reproduce the Jacobian")
     end
@@ -493,7 +496,7 @@ function push_forcing!()
     # `merged_param` arrays, so `refresh_forcing` moves it too -- but only if
     # this line is here. Miss it and the Jacobian freezes at the T0 epoch while
     # the RHS moves, which is a wrong Jacobian that still converges.
-    SYMJAC && rx_sync!(dev_bufsJ, jacE.fJ!)
+    SYMJAC && rx_sync!(dev_bufsJ, BAND.fJ)
     return nothing
 end
 push_forcing!()
@@ -916,6 +919,9 @@ function refresh_forcing(t)
         merged_param[k] .= EA._provider_const_field(EA.provider_sample(prov, t), k)
     end
     foreach(d -> d.materialize!(), dms)
+    # the band program's materialized fields are derived from the same arrays;
+    # skip this and they stay at the T0 epoch while the RHS halves' advance.
+    SYMJAC && BAND.dmJ.materialize!()
     push_forcing!()
     SHARDS > 0 && shard_refresh_all!(SHARD)
     CUR_EPOCH[] = t

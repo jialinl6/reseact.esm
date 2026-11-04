@@ -213,7 +213,7 @@ struct SubRung
     pa::Dict{String,Any}
     meta
     th
-    jacE
+    band
     plan
     gjb
     dev_bufs
@@ -299,33 +299,35 @@ function build_rung(docCAP0, C::Int, spnames::Vector{String}, geom,
         nb == 0 || error("build_rung: the C=$C RHS returns $nb of $(length(du)) NON-FINITE derivatives at the primed base point; the lane gather is not reaching this build")
     end
 
-    jacE = plan = gjb = dev_bufsJ = nothing; tjac = 0.0
+    band = plan = gjb = dev_bufsJ = nothing; tjac = 0.0
     if SYMJAC
         tj = time()
-        jacE = Logging.with_logger(Logging.NullLogger()) do
-            EarthSciASTDiff.prepare_jacobian(EA.coerce_esm_file(cd); model_name = "Flattened",
-                wrt = :states, build_kwargs = (; form = :oop, parameter_overrides = ovc,
-                                                 const_arrays = ca, param_arrays = pa))
+        # The band build takes exactly the capacity RHS's build kwargs, and that
+        # RHS has no DiscreteMaterializer, so neither does this. NOT YET RUN on
+        # the EarthSciASTDiff 0.3 port (tools/rx_band_program.jl).
+        band = Logging.with_logger(Logging.NullLogger()) do
+            band_program(EA.coerce_esm_file(cd); model_name = "Flattened",
+                source_layout = (u0 = u0c, p = pc, var_map = vmc),
+                build_kwargs = (; parameter_overrides = ovc, const_arrays = ca,
+                                  param_arrays = pa))
         end
         tjac = time() - tj
-        jacE.oop || error("build_rung: the C=$C band model came back IN-PLACE; it " *
-                          "captures host scratch per node and cannot be traced")
-        String(jacE.structure) == "block_diagonal" ||
-            error("build_rung: the C=$C Jacobian is $(jacE.structure), not block_diagonal")
-        plan = RxSymBlockJac.block_jac_plan(jacE;
+        band.structure === :block_diagonal ||
+            error("build_rung: the C=$C Jacobian is $(band.structure), not block_diagonal")
+        plan = RxSymBlockJac.block_jac_plan(band;
                     runner_names = first.(sort(collect(vmc), by = last)))
-        gjb  = rx_rhs(jacE.fJ!)
-        dev_bufsJ = map(RX.ConcreteRArray, rx_bufs(jacE.fJ!))
+        gjb  = rx_rhs(band.fJ)
+        dev_bufsJ = map(RX.ConcreteRArray, rx_bufs(band.fJ))
         # Two compiled evaluations of the band model, and they are the only
         # thing between a transposed gather and a plausible Jacobian that is
         # wrong everywhere.
-        let w = validate_plan(plan, jacE, u0c, pc, T0;
-                              eval_band = rx_host_eval(jacE.fJ!, pc, T0,
-                                                       rx_bufs(jacE.fJ!)))
+        let w = validate_plan(plan, band, u0c, pc, T0;
+                              eval_band = rx_host_eval(band.fJ, pc, T0,
+                                                       rx_bufs(band.fJ)))
             w <= 1e-12 || error("build_rung: the C=$C gather plan does not reproduce " *
                                 "the Jacobian (worst relative $w)")
         end
-        say(@sprintf("    C=%-5d prepare_jacobian %6.1f s  %s", C, tjac, string(plan)))
+        say(@sprintf("    C=%-5d band program %6.1f s  %s", C, tjac, string(plan)))
     end
 
     dev_bufs = map(RX.ConcreteRArray, rx_bufs(f))
@@ -338,7 +340,7 @@ function build_rung(docCAP0, C::Int, spnames::Vector{String}, geom,
     tcomp = time() - tc
     say(@sprintf("    C=%-5d build %5.1f s  compile %6.1f s  (nstates=%d, buffers=%d)",
                  C, tbuild, tcomp, length(u0c), length(dev_bufs)))
-    return SubRung(C, f, copy(u0c), pc, vmc, pa, meta, th, jacE, plan, gjb,
+    return SubRung(C, f, copy(u0c), pc, vmc, pa, meta, th, band, plan, gjb,
                    dev_bufs, dev_bufsJ, cstep, capsel, tbuild, tjac, tcomp)
 end
 
@@ -411,7 +413,7 @@ end
 function batch_gather!(L::SubLadder, r::SubRung, lane_cells::Vector{NTuple{3,Int}})
     gather_lanes!(r.pa, r.meta, L.geom, lane_cells)
     rx_sync!(r.dev_bufs, r.f)
-    SYMJAC && rx_sync!(r.dev_bufsJ, r.jacE.fJ!)
+    SYMJAC && rx_sync!(r.dev_bufsJ, r.band.fJ)
     return nothing
 end
 

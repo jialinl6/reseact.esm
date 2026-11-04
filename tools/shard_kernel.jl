@@ -83,17 +83,18 @@ const RX = Reactant
 # The price is an ordering requirement: the parent must already have these when
 # it includes this file. Both loaders do, and the check below says so plainly
 # if a third one does not.
-for _n in (:CapacityChem, :RxTracedIntegrator, :RxSymBlockJac, :RxRHS,
+for _n in (:CapacityChem, :RxTracedIntegrator, :RxSymBlockJac, :RxRHS, :RxBandProgram,
            :stencil_following_rule, :index_promoted_refs_by_loop!)
     isdefined(HOST, _n) || error(
         "shard_kernel.jl: its parent module $(HOST) has no `$(_n)`. This file must be " *
         "included AFTER capacity_chem.jl, rx_traced_integrator.jl, rx_sym_block_jac.jl, " *
-        "rx_rhs.jl and split_common.jl are loaded into that same scope.")
+        "rx_rhs.jl, rx_band_program.jl and split_common.jl are loaded into that same scope.")
 end
 const CC   = HOST.CapacityChem
 const RTI  = HOST.RxTracedIntegrator
 const RSBJ = HOST.RxSymBlockJac
 const RXR  = HOST.RxRHS
+const RBP  = HOST.RxBandProgram
 const stencil_following_rule      = HOST.stencil_following_rule
 const index_promoted_refs_by_loop! = HOST.index_promoted_refs_by_loop!
 
@@ -111,7 +112,7 @@ mutable struct ShardState
     vmc::Dict{String,Int}
     capsel::Vector{Int}
     masks
-    jacE
+    band
     plan
     gjb
     dev_bufs
@@ -205,19 +206,22 @@ function build!(st::ShardState, cfg::Dict, ca::Dict{String,Any},
     end
 
     tj = time()
-    st.jacE = Logging.with_logger(Logging.NullLogger()) do
-        EarthSciASTDiff.prepare_jacobian(EA.coerce_esm_file(st.cd); model_name = "Flattened",
-            wrt = :states, build_kwargs = (; form = :oop, parameter_overrides = ov,
-                                             const_arrays = ca, param_arrays = st.pa))
+    # The band build takes exactly the capacity RHS's build kwargs, and that RHS
+    # has no DiscreteMaterializer, so neither does this. NOT YET RUN on the
+    # EarthSciASTDiff 0.3 port (tools/rx_band_program.jl).
+    st.band = Logging.with_logger(Logging.NullLogger()) do
+        RBP.band_program(EA.coerce_esm_file(st.cd); model_name = "Flattened",
+            source_layout = (u0 = u0c, p = pc, var_map = vmc),
+            build_kwargs = (; parameter_overrides = ov, const_arrays = ca,
+                              param_arrays = st.pa))
     end
     tjac = time() - tj
-    memlog(st, "prepare_jacobian")
-    st.jacE.oop || error("shard build: the C=$C band model came back IN-PLACE")
-    String(st.jacE.structure) == "block_diagonal" ||
-        error("shard build: the C=$C Jacobian is $(st.jacE.structure), not block_diagonal")
-    st.plan = RSBJ.block_jac_plan(st.jacE;
+    memlog(st, "band program")
+    st.band.structure === :block_diagonal ||
+        error("shard build: the C=$C Jacobian is $(st.band.structure), not block_diagonal")
+    st.plan = RSBJ.block_jac_plan(st.band;
                   runner_names = first.(sort(collect(vmc), by = last)))
-    st.gjb = RXR.rx_rhs(st.jacE.fJ!)
+    st.gjb = RXR.rx_rhs(st.band.fJ)
     # A CHECK OF THE BUILD: the plan's two gathers against the evaluator's own
     # index algebra, over two compiled evaluations of the band model. It runs
     # ONCE PER DISTINCT CAPACITY SIZE and not once per shard. What it validates
@@ -231,14 +235,14 @@ function build!(st::ShardState, cfg::Dict, ca::Dict{String,Any},
     # of the largest single items in a worker's footprint, so the driver asks
     # for it on one shard of each size (`cfg["validate_plan"]`).
     if get(cfg, "validate_plan", true)
-        w = RSBJ.validate_plan(st.plan, st.jacE, u0c, pc, cfg["T0"];
-                               eval_band = RXR.rx_host_eval(st.jacE.fJ!, pc, cfg["T0"],
-                                                            RXR.rx_bufs(st.jacE.fJ!)))
+        w = RSBJ.validate_plan(st.plan, st.band, u0c, pc, cfg["T0"];
+                               eval_band = RXR.rx_host_eval(st.band.fJ, pc, cfg["T0"],
+                                                            RXR.rx_bufs(st.band.fJ)))
         w <= 1e-12 || error("shard build: the C=$C gather plan does not reproduce the Jacobian (worst relative $w)")
     end
     memlog(st, "plan + validate")
     st.dev_bufs  = map(RX.ConcreteRArray, RXR.rx_bufs(f))
-    st.dev_bufsJ = map(RX.ConcreteRArray, RXR.rx_bufs(st.jacE.fJ!))
+    st.dev_bufsJ = map(RX.ConcreteRArray, RXR.rx_bufs(st.band.fJ))
     st.th = (p = _devp(pc), bufs = st.dev_bufs, bufsJ = st.dev_bufsJ)
 
     frhs = RXR.rx_rhs(f; var_map = vmc)
@@ -368,7 +372,7 @@ function memlog_fields(st::ShardState)
     for (nm, v) in (("docCAP0 (split model)", st.docCAP0),
                     ("cd (capacity document)", st.cd),
                     ("f (capacity RHS)", st.f),
-                    ("jacE (band model)", st.jacE),
+                    ("band (band model)", st.band),
                     ("plan (block Jacobian)", st.plan),
                     ("gjb (band RHS)", st.gjb),
                     ("pa (lane buffers)", st.pa),
@@ -399,7 +403,7 @@ end
 function refresh!(st::ShardState, lanes::Dict{String,Any})
     copy_lanes!(st.pa, lanes)
     RXR.rx_sync!(st.dev_bufs, st.f)
-    RXR.rx_sync!(st.dev_bufsJ, st.jacE.fJ!)
+    RXR.rx_sync!(st.dev_bufsJ, st.band.fJ)
     return nothing
 end
 

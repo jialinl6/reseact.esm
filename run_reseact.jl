@@ -165,7 +165,12 @@ const GRID_MP  = SLICE.metaparameters
 const NLEV_EFF = GRID_MP["NLEV"]
 const T_END = T0 + SOLVE_SECS
 const RTOL, ATOL, ATOL_T = 1e-4, 1e-9, 1e-6
-const LU = LinearSolve.LUFactorization()
+# GENERIC LU, not LUFactorization: on the BlockDiagonal W, LUFactorization calls
+# the non-mutating lu(W), which copies every cell's block into a fresh result one
+# block at a time; GenericLUFactorization reaches EarthSciMLBase's fused
+# generic_lufact!, which factors the blocks in place, threaded. Same step counts,
+# digest equal to round-off, 16% off the CONUS time loop.
+const LU = LinearSolve.GenericLUFactorization()
 
 # FastJX's solar chain (NOAA Spencer, as GasChem's FastJX), mirrored here ONLY to
 # label the output rows with the sun angle the run is seeing (FastJX's cosSZA is

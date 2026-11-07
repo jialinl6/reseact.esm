@@ -76,6 +76,16 @@ the runner's default and projects to about 2 h of loop.
   it rather than this table when in doubt. `tools/diag/provenance/` keeps the patch
   that was uncommitted in EarthSciASTDiff at the time of the 48 h runs (now `7f83c11`, compat widened in `0bd517f`).
 
+  **`EarthSciMLBase`** is a seventh sibling, but not a package in the environment:
+  `prototypes/reseact_3d_chem/blockdiag_local.jl` `include`s its `src/map_algorithm.jl`,
+  `src/blockdiagonal.jl` and `ext/polyester_map.jl` straight from a checkout at
+  `../EarthSciMLBase` (no `.jl` suffix), or from the `src/` that `EARTHSCIMLBASE_SRC`
+  points at. The provenance block does not report it. Since 2026-11-07 the native runner
+  factors and solves the chemistry W with `MapPolyester`, which that checkout must
+  provide: branch `perf/map-polyester` of `jialinl6/EarthSciMLBase.jl` (based on
+  `59d7ee086`) until it merges. With an older checkout `run_reseact.jl` stops at
+  `MapPolyester()` with an `UndefVarError`; the compiled and adjoint runners do not use it.
+
   The Manifest pins Reactant v0.2.280 and Enzyme v0.13.199. It still RECORDS
   EarthSciAST as v0.1.1 while the checkout's Project.toml says 0.2.0; path-developed
   packages load from the path regardless, and the `Pkg.develop` step below re-resolves
@@ -85,7 +95,8 @@ the runner's default and projects to about 2 h of loop.
 
 ## Setting up on another machine
 
-1. Clone this repo and the six siblings into one directory.
+1. Clone this repo, the six siblings and EarthSciMLBase (as `EarthSciMLBase`, see above)
+   into one directory.
 2. Re-point the environment's development paths. `run-model-jl/Manifest.toml` records
    them as absolute paths (`path = "/projects/.../EarthSciAST/pkg/EarthSciAST.jl"` etc.).
    From the repo root:

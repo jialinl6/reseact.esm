@@ -54,7 +54,7 @@ end
 
 # NS-color block-diagonal FD Jacobian for a cell-major pointwise RHS `f_cm!`.
 # Returns (jac_cm!(J,u,p,t) filling a BlockDiagonal, mkjp() building the prototype).
-function block_fd_jac(f_cm!, NS, NC)
+function block_fd_jac(f_cm!, NS, NC; alg = MapBroadcast())
     N = NS * NC
     du0 = Vector{Float64}(undef, N); up = Vector{Float64}(undef, N); dup = Vector{Float64}(undef, N)
     hbuf = Vector{Float64}(undef, NC)
@@ -78,7 +78,7 @@ function block_fd_jac(f_cm!, NS, NC)
         end
         return nothing
     end
-    mkjp() = BlockDiagonal(zeros(NS, NS, NC), MapBroadcast())
+    mkjp() = BlockDiagonal(zeros(NS, NS, NC), alg)   # alg: what its LU and solve map over the cells with
     return jac_cm!, mkjp
 end
 
@@ -105,7 +105,7 @@ end
 # The permutation is redone here over Dual buffers rather than reusing
 # `cellmajor_rhs`, whose scratch is concretely Vector{Float64}; keeping that path
 # monomorphic leaves the hot Float64 RHS untouched.
-function block_ad_jac(f_sm!, sm_of_cm, NS, NC)
+function block_ad_jac(f_sm!, sm_of_cm, NS, NC; alg = MapBroadcast())
     N = NS * NC
     N == length(sm_of_cm) || error("block_ad_jac: NS*NC=$N != length(sm_of_cm)=$(length(sm_of_cm))")
     D = ForwardDiff.Dual{typeof(f_sm!),Float64,NS}
@@ -131,6 +131,6 @@ function block_ad_jac(f_sm!, sm_of_cm, NS, NC)
         end
         return nothing
     end
-    mkjp() = BlockDiagonal(zeros(NS, NS, NC), MapBroadcast())
+    mkjp() = BlockDiagonal(zeros(NS, NS, NC), alg)   # alg: what its LU and solve map over the cells with
     return jac_cm!, mkjp
 end

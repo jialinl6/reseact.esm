@@ -224,6 +224,12 @@ ff = merge(ff, (; const_arrays = GridResize.slice_hybrid_coefs(ff.const_arrays, 
 let tp = time(), n = sum(length(EarthSciIO.prefetch(pr)) for pr in values(ff.providers))
     say(@sprintf("    prefetch: %d provider-files warm in %.1f s", n, time() - tp))
 end
+# EarthSciAST splits each generated function into pieces of at most this many
+# emitted nodes (default 20,000). For this model 10,000 compiles the first step
+# ~175 s faster (612-632 s -> 444-454 s on the CONUS 13x7x30 test), loop unchanged,
+# results bit-identical; 5,000 makes the loop 2.7x slower. `get!` keeps a cap
+# already set in the environment.
+get!(ENV, "ESS_CODEGEN_FN_NODE_CAP", "10000")
 tb = time()
 run = build_split_run(docs, (T0, T_END);
     providers = ff.providers, const_arrays = ff.const_arrays,

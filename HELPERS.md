@@ -113,6 +113,32 @@ the run. This needs the EarthSciIO fix that locates a record inside *its own*
 file (`_file_record`): the cadence tick is global, the file is local, and tick 9
 of a 3-hourly cadence used to ask an 8-record file for record 9.
 
+**Chemistry forcing time — `RESEACT_FORCING_TIME=stage|midstep`.** `stage` (the
+default, unchanged behaviour) evaluates the chemistry's time-dependent inputs —
+the time-blended GEOS-FP fields, the sun angle and Fast-JX photolysis, the
+emissions and the rate constants they feed — at every RHS/Jacobian call's own
+stage time. `midstep` (D-GC) evaluates them once per macro step, at its midpoint,
+for every chemistry call in it, which is what GEOS-Chem does over its chemistry
+timestep (fullchem: `Update_RCONST` once per box before KPP's `Integrate`,
+`ICNTRL(15) = -1`, photolysis at `SUNCOS_MID`). Transport is unchanged. Any other
+value is an error, and every runner prints which mode it runs. Measured at CONUS
+13×7×30, 1 day, 8 threads (native): time loop 232.0 → 125.9 s, chemistry steps
+9,092 → 5,140; surface O3 mean −8e-5 ppb (max 0.017 ppb), NO2 RMS relative 0.17 %.
+The compiled runner's `midstep` matches the native one's to 2e-10 on O3 and 7e-7
+on NO2. How each runner carries the midpoint:
+
+* `run_reseact.jl` — a `TFORCE` Ref set once per macro step and read by the
+  chemistry RHS and Jacobian. A bisected step keeps the whole step's midpoint. It
+  refuses a lattice that would put a GEOS-FP refresh *inside* a macro step.
+* `run_reseact_reactant.jl` — `tmid` in the chemistry `adaptive_solve`'s `aux`.
+  It must be loop-carried: captured by the closures it fails MLIR verification.
+* `tools/adjoint_gradient.jl` — `tf` in the chemistry theta (`chem_theta`),
+  checkpointed per macro step (`Ckpt.tf`) and restored for every replay, VJP, JVP
+  and fd replay of that step, and sent with every chemistry shard call. It is a
+  Const for Enzyme. Not with `RESEACT_SUBCYCLE`/`RESEACT_BUCKET`, and
+  `tools/sensitivity_forward.jl` (the forward arm of `run_reseact_adjoint.jl`)
+  refuses `midstep`.
+
 ### `run_reseact.jl` (native in-place) — the above **plus** `op_split.jl`.
 
 Builds two in-place `f!(du,u,p,t)` closures and drives the Lie-Trotter split with

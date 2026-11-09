@@ -155,6 +155,9 @@
 #   RESEACT_ADJ_REFPARAM  parameters for the forward-mode reference
 #                         (default NEIRegrid.scale,Transport3D.tau_pblmix,NEIRegrid.g0)
 #   RESEACT_ADJ_CSV       write the full 49-component gradient here
+#   RESEACT_FORCING_TIME  stage (default) | midstep -- the chemistry's inputs at each
+#                         stage time, or at the macro-step midpoint (D-GC; see
+#                         `chem_theta`). Not with RESEACT_SUBCYCLE / RESEACT_BUCKET.
 # ===========================================================================
 import Pkg
 const REPO = normpath(joinpath(@__DIR__, ".."))
@@ -299,6 +302,23 @@ if DEVLOOP != "0"
               "the frozen grid needs the driver's OWN chemistry step and Jacobian inside " *
               "one traced loop, and the shards hold theirs in other processes.")
 end
+# WHEN THE CHEMISTRY SEES ITS TIME-DEPENDENT INPUTS (run_reseact.jl has the full
+# note). `stage`, the default, is every line below exactly as it was. `midstep`
+# (D-GC) evaluates the time-blended GEOS-FP fields, the sun angle and photolysis,
+# the emissions and the rate constants they feed at the MIDPOINT of each macro
+# step for every chemistry RHS and Jacobian call in it, as GEOS-Chem does over its
+# chemistry timestep. Transport is unchanged. The midpoint rides in the chemistry
+# theta as `tf` (see `chem_theta`), is checkpointed with the macro step, and is
+# restored for every replay and VJP of it, so the backward sweep differentiates
+# exactly the map the forward pass ran.
+const FORCING_TIME = get(ENV, "RESEACT_FORCING_TIME", "stage")
+FORCING_TIME in ("stage", "midstep") ||
+    error("RESEACT_FORCING_TIME must be stage or midstep, got $FORCING_TIME")
+const FORCING_MID = FORCING_TIME == "midstep"
+FORCING_MID && (SUBCYCLE || BUCKETK > 0) &&
+    error("RESEACT_FORCING_TIME=midstep is not wired into RESEACT_SUBCYCLE / RESEACT_BUCKET: " *
+          "their capacity rungs build their own chemistry programs, which would still read " *
+          "the stage time -- run them with RESEACT_FORCING_TIME=stage.")
 _env(k, d) = parse(Int, get(ENV, "RESEACT_$k", string(d)))
 _envi(k)   = haskey(ENV, "RESEACT_$k") ? parse(Int, ENV["RESEACT_$k"]) : nothing
 # RESEACT_RES picks the GEOS-FP grid row (GEOSFP_GRIDS in split_common.jl:
@@ -321,6 +341,9 @@ say("=== $LABEL : TIME-LOOP ADJOINT ($(basename(MODEL))) " *
     "grid=$(GRID_MP["NLON"])x$(GRID_MP["NLAT"])x$NLEV_EFF T0=$(round(Int,T0)) " *
     "nmacro=$NMACRO macro_dt=$(round(Int,MACRO_DT)) ujitter=$UJIT ===")
 say("    stages: " * join(sort(collect(STAGES)), ", "))
+say("    chemistry time-dependent inputs at: " *
+    (FORCING_MID ? "the macro-step midpoint (RESEACT_FORCING_TIME=midstep, D-GC)" :
+                   "each stage time (RESEACT_FORCING_TIME=stage)"))
 
 # --------------------------------------------------------------------------- #
 # 1. Build -- identical to run_reseact_reactant.jl / sensitivity_forward.jl.
@@ -484,9 +507,11 @@ end
 
 # The RHS with its differentiable payload an EXPLICIT argument: the production
 # call site hides p and the forcing buffers in a closure, and a closure is
-# opaque to Enzyme.
+# opaque to Enzyme. Under RESEACT_FORCING_TIME=midstep the chemistry reads its
+# time-dependent inputs at `th.tf` (see `chem_theta`) instead of the stage time.
 gT(u, th, t) = g4[1](u, th.p, t, th.bufs)
-gC(u, th, t) = g4[2](u, th.p, t, th.bufs)
+_tchem(th, t) = FORCING_MID ? th.tf : t
+gC(u, th, t) = g4[2](u, th.p, _tchem(th, t), th.bufs)
 
 dev_bufs = [map(RX.ConcreteRArray, host_bufs[i]) for i in 1:2]
 SYMJAC && (dev_bufsJ = map(RX.ConcreteRArray, host_bufsJ))
@@ -511,8 +536,36 @@ const THT = (p = PRd, bufs = dev_bufs[1])
 thC(pp, bb, bbJ) = SYMJAC ? (p = pp, bufs = bb, bufsJ = bbJ) : (p = pp, bufs = bb)
 const THC = thC(PRd, dev_bufs[2], dev_bufsJ)
 # u -> the NS x NS matrix of length-NC cell-block diagonals, all on device.
-gJ = SYMJAC ? ((u, th, t) -> block_jac(PLAN, gjbJ(gather_uj(PLAN, u), th.p, t, th.bufsJ))) :
+gJ = SYMJAC ? ((u, th, t) -> block_jac(PLAN, gjbJ(gather_uj(PLAN, u), th.p, _tchem(th, t),
+                                                  th.bufsJ))) :
               nothing
+
+# THE FORCING TIME RIDES IN THE CHEMISTRY THETA. Under RESEACT_FORCING_TIME=midstep,
+# `chem_theta(TH, tf)` is TH plus `tf`, the macro step's midpoint, as a runtime
+# scalar, so ros_step, ros_vjp, ros_jvp, the ctl stage's traced loop and the
+# frozen device loop all see it with no signature change, and one compile serves
+# every macro step. Under `stage` it returns TH itself, so every program compiles
+# exactly as before.
+#
+# THC CARRIES NO `tf`, ON PURPOSE. Every chemistry program is compiled on
+# `chem_theta(THC, ...)`, and a compiled program is typed on its theta, so a call
+# site that hands it the bare THC is a MisMatchedThunkTypeError at that call (a
+# FieldError on the shard path) -- never chemistry run at a stale or unset time.
+# The forcing time of macro step k is `CKPTS[k].tf`, and every replay, VJP, JVP
+# and fd replay of that step builds its theta from it.
+#
+# tf IS CONSTANT FOR ENZYME. The VJP's `active_bufs = false` (BUFGRAD=0, the
+# default) makes everything in theta except `p` a Const, `tf` included, and the
+# JVP's theta tangent has tf = 0 (`_zero_like`). Under RESEACT_ADJ_BUFGRAD=1 it is
+# active like the bufs, and its gradient is discarded with theirs; dJ/dp is the
+# same either way.
+_with_tf(th::NamedTuple, tf) = FORCING_MID ? merge(th, (tf = tf,)) : th
+chem_theta(th::NamedTuple, tf::Float64) =
+    FORCING_MID ? _with_tf(th, RX.ConcreteRNumber(tf)) : th
+# the forcing time of macro step [t0, t1]; NaN under `stage`, where nothing reads it
+tforce(t0::Float64, t1::Float64) = FORCING_MID ? (t0 + t1) / 2 : NaN
+# The compile-time example: shapes only, the value is never used.
+const THCX = chem_theta(THC, tforce(T0, T0 + MACRO_DT))
 
 # every entry of `p` must be a runtime scalar; the gradient vector IS `keys(p)`.
 const PNAMES = Tuple(sort(collect(keys(p))))
@@ -679,7 +732,7 @@ CSSP = timed_compile("ssp_step", () -> RX.@compile compile_options=COPTS ssp_ste
 # compares them against the traced loop, asked for them.
 const OWN_CHEM = SHARDS == 0 || want("ctl")
 CROS = OWN_CHEM ?
-    timed_compile("ros_step", () -> RX.@compile compile_options=COPTS ros_step(U_R, THC, T_R, DTC_R)) : nothing
+    timed_compile("ros_step", () -> RX.@compile compile_options=COPTS ros_step(U_R, THCX, T_R, DTC_R)) : nothing
 # With RESEACT_ADJ_DEVLOOP=1 the backward sweep never issues a SINGLE-STEP VJP:
 # a whole macro-step half is one device program. Compiling these anyway is
 # minutes and gigabytes of pure waste at CONUS -- ros_vjp alone was 573 s and the
@@ -690,7 +743,7 @@ _need_step_vjp() = want("adj") && (DEVLOOP != "1" || want("ref"))
 CSSPV = _need_step_vjp() ?
     timed_compile("ssp_vjp", () -> RX.@compile compile_options=COPTS ssp_vjp(U_R, THT, LAM_R, T_R, DTT_R)) : nothing
 CROSV = (_need_step_vjp() && OWN_CHEM) ?
-    timed_compile("ros_vjp", () -> RX.@compile compile_options=COPTS ros_vjp(U_R, THC, LAM_R, T_R, DTC_R)) : nothing
+    timed_compile("ros_vjp", () -> RX.@compile compile_options=COPTS ros_vjp(U_R, THCX, LAM_R, T_R, DTC_R)) : nothing
 
 # --- the LEVEL SUBCYCLE's own programs (RESEACT_SUBCYCLE=1 only) -----------
 # `ros_step_cw` is `ros_step` plus the PER-CELL error norm (`cellwise=true` costs
@@ -829,9 +882,15 @@ function vjp_call(cvjp, u::Vector{Float64}, lam::Vector{Float64}, TH, t::Float64
     return lin, g
 end
 if SHARDS > 0
-    step_call(S::ShardSet, u::Vector{Float64}, TH, t::Float64, dt::Float64) = shard_step(S, u, t, dt)
+    # The shards compile their own chemistry programs, so of `TH` they need only the
+    # forcing time, as a host scalar; reading it back is one scalar copy per call
+    # next to an RPC. Under midstep a TH without `tf` (the bare THC) is a FieldError
+    # here, as it is a type mismatch on the driver's own programs.
+    _host_tf(TH) = FORCING_MID ? Float64(TH.tf) : NaN
+    step_call(S::ShardSet, u::Vector{Float64}, TH, t::Float64, dt::Float64) =
+        shard_step(S, u, t, dt, _host_tf(TH))
     vjp_call(S::ShardSet, u::Vector{Float64}, lam::Vector{Float64}, TH, t::Float64, dt::Float64) =
-        shard_vjp(S, u, lam, t, dt)
+        shard_vjp(S, u, lam, t, dt, _host_tf(TH))
 end
 
 # --------------------------------------------------------------------------- #
@@ -941,9 +1000,11 @@ refresh_forcing_if_needed(t) = (t == CUR_EPOCH[] || refresh_forcing(t); nothing)
 # One macro step, Lie-Trotter: transport over [t0,t1] THEN chemistry over the
 # same interval. Records the ACCEPTED (t, dt) sequence of each half -- 16 B per
 # inner step, which is nothing next to the 681 kB state, and it is what makes
-# the backward replay reproducible (see `replay_fixed`).
+# the backward replay reproducible (see `replay_fixed`). `tf` is the chemistry's
+# forcing time (`tforce`), which the caller checkpoints with the step.
 function macro_step(u::Vector{Float64}, t0::Float64, t1::Float64,
-                    dtT::Float64, dtC::Float64; record::Bool = false)
+                    dtT::Float64, dtC::Float64; record::Bool = false,
+                    tf::Float64 = tforce(t0, t1))
     tpT = record ? StepRec[] : nothing
     tpC = record ? StepRec[] : nothing
     sT = StepSeq(); sC = StepSeq()
@@ -979,7 +1040,8 @@ function macro_step(u::Vector{Float64}, t0::Float64, t1::Float64,
         naC = st.calls; nrC = st.rejects; dtCe = dtC
         return uC, dtTe, dtCe, (naT, nrT, naC, nrC), tpT, tpC, sT, sC
     end
-    uC, _, dtCe, naC, nrC = host_adaptive!(CROS_EXEC, uT, t0, t1, dtC, RTI.pictrl_ros23(), THC;
+    uC, _, dtCe, naC, nrC = host_adaptive!(CROS_EXEC, uT, t0, t1, dtC, RTI.pictrl_ros23(),
+                                           chem_theta(THC, tf);
                                            tape = tpC, seq = sC, clamp_nonneg = CLAMP[])
     return uC, dtTe, dtCe, (naT, nrT, naC, nrC), tpT, tpC, sT, sC
 end
@@ -990,6 +1052,7 @@ struct Ckpt
     dtT::Float64
     dtC::Float64
     epoch::Float64
+    tf::Float64          # the chemistry's forcing time (`tforce`; NaN under stage)
     seqT::StepSeq
     seqC::StepSeq
 end
@@ -1052,8 +1115,10 @@ function forward_pass(; record::Bool = false)
     for tnext in STOPS
         tnext <= tcur + 1e-9 && continue
         ustart = copy(u)
-        u, dtT, dtC, cnt, tpT, tpC, sT, sC = macro_step(u, tcur, tnext, dtT, dtC; record = record)
-        push!(ckpts, Ckpt(ustart, tcur, dtT, dtC, epoch, sT, sC))
+        tf = tforce(tcur, tnext)
+        u, dtT, dtC, cnt, tpT, tpC, sT, sC = macro_step(u, tcur, tnext, dtT, dtC;
+                                                         record = record, tf = tf)
+        push!(ckpts, Ckpt(ustart, tcur, dtT, dtC, epoch, tf, sT, sC))
         push!(counts, cnt); record && push!(tapes, (tpT, tpC))
         tcur = tnext
         if round(tnext; digits = 6) in FSTOPS
@@ -1158,7 +1223,7 @@ function backward_stage!(cvjp, tape::Vector{StepRec}, lam::Vector{Float64}, TH,
         # is -- record everything needed to reproduce that one VJP.
         if BADREC[] === nothing && (nout = count(!isfinite, lout); nout > nin || gbad > 0)
             BADREC[] = (label = String(label), j = j, n = length(tape), t = e.t,
-                        dt = e.dt, u = copy(e.u), lam = copy(lam))
+                        dt = e.dt, u = copy(e.u), lam = copy(lam), th = TH)
             say(@sprintf("  FIRST NON-FINITE: %s step %d of %d (t=%.6f dt=%.6g): lambda_in bad %d -> lambda_out bad %d, grad_theta bad %d of %d",
                          label, j, length(tape), e.t, e.dt, nin, nout, gbad, length(PNAMES)))
             byg = Dict{String,Int}()
@@ -1194,7 +1259,7 @@ function tapes_for(k::Int)
     KEEPTAPE && return (TAPES[k][1], TAPES[k][2], 0.0)
     ck = CKPTS[k]
     trep = time()
-    uend, a, b = replay_fixed(ck.u, ck.seqT, ck.seqC)
+    uend, a, b = replay_fixed(ck.u, ck.seqT, ck.seqC; TH_C = chem_theta(THC, ck.tf))
     el = time() - trep
     ref = k < length(CKPTS) ? CKPTS[k + 1].u : UEND
     if !isempty(ref)
@@ -1215,6 +1280,7 @@ function backward_sweep(lam0::Vector{Float64})
     for k in length(CKPTS):-1:1
         ck = CKPTS[k]
         refresh_forcing_if_needed(ck.epoch)      # forcing replayed from the checkpoint
+        THCk = chem_theta(THC, ck.tf)             # and the chemistry's forcing time
         if DEVUSE[]
             # THE FROZEN GRID ON THE DEVICE. Four calls per macro step instead
             # of 2*(naT + naC): the frozen forward composition of each half, and
@@ -1224,11 +1290,11 @@ function backward_sweep(lam0::Vector{Float64})
             # Lie-Trotter order is unchanged: chemistry backwards FIRST.
             trep = time()
             umid = devloop_replay(:T, ck.u, ck.seqT)
-            uend = devloop_replay(:C, umid, ck.seqC)
+            uend = devloop_replay(:C, umid, ck.seqC; TH = THCk)
             el = time() - trep
             devloop_checkpoint_check(k, uend)
             t_replay += el
-            lam, gC_ = devloop_vjp(:C, umid, lam, ck.seqC)
+            lam, gC_ = devloop_vjp(:C, umid, lam, ck.seqC; TH = THCk)
             lam, gT_ = devloop_vjp(:T, ck.u, lam, ck.seqT)
             for (i, kk) in enumerate(PNAMES); gacc[kk] += gC_[i] + gT_[i]; end
             devloop_finite_check(k, lam, gC_, gT_)
@@ -1240,7 +1306,7 @@ function backward_sweep(lam0::Vector{Float64})
         end
         tpT, tpC, el = tapes_for(k)
         t_replay += el
-        lam = backward_stage!(CROSV_EXEC, tpC, lam, THC, "chem[macro $k]")   # chemistry LAST forward => FIRST back
+        lam = backward_stage!(CROSV_EXEC, tpC, lam, THCk, "chem[macro $k]")   # chemistry LAST forward => FIRST back
         lam = backward_stage!(CSSPV, tpT, lam, THT, "transport[macro $k]")
         nvjp += length(tpC) + length(tpT)
         # FLUSH, not decoration. Julia block-buffers a file stdout at 64 kB and
@@ -1389,7 +1455,7 @@ if want("adj") && BADREC[] !== nothing && !(SHARDS > 0 && CROSV === nothing)
     ischem = startswith(b.label, "chem")
     cvjp = ischem ? CROSV : CSSPV
     cstep = ischem ? CROS : CSSP
-    TH = ischem ? THC : THT
+    TH = b.th                       # the theta that VJP ran with (forcing time included)
     say("\n---- PROBE: the first non-finite VJP ($(b.label), step $(b.j) of $(b.n)) ----")
     UB = RX.ConcreteRArray(b.u); TB = RX.ConcreteRNumber(b.t); DB = RX.ConcreteRNumber(b.dt)
     let rp = cstep(UB, TH, TB, DB)
@@ -1515,10 +1581,12 @@ if want("ctl")
         u, t0_, t1_, d0, RTI.pictrl_ros23(), th; clamp_nonneg = true)
     T1R = RX.ConcreteRNumber(T0 + MACRO_DT)
     refresh_forcing(T0)
+    # the theta rides in `aux`, the while's loop-carried operand, so its `tf` does too
+    THC1 = chem_theta(THC, tforce(T0, T0 + MACRO_DT))
     cT = timed_compile("adaptiveT", () -> RX.@compile compile_options=COPTS adapT(U_R, THT, T_R, T1R, DTT_R))
-    cC = timed_compile("adaptiveC", () -> RX.@compile compile_options=COPTS adapC(U_R, THC, T_R, T1R, DTC_R))
+    cC = timed_compile("adaptiveC", () -> RX.@compile compile_options=COPTS adapC(U_R, THC1, T_R, T1R, DTC_R))
     for (nm, c, TH, dt0, ctrl, cstep) in ((:transport, cT, THT, DT0T, RTI.pictrl_ssprk43(), CSSP),
-                                          (:chemistry, cC, THC, DT0C, RTI.pictrl_ros23(), CROS))
+                                          (:chemistry, cC, THC1, DT0C, RTI.pictrl_ros23(), CROS))
         r = c(U_R, TH, T_R, T1R, RX.ConcreteRNumber(dt0))
         ud = Array(r[1]); ndev = (Float64(r[4]), Float64(r[5]))
         uh, th_, dth, na, nr = host_adaptive!(cstep, copy(UBASE), T0, T0 + MACRO_DT, dt0, ctrl, TH)
@@ -1557,10 +1625,11 @@ _todev(x::Tuple) = map(_todev, x)
 if want("ref") && want("adj")
     say("\n---- REF: forward-mode JVP chained over the SAME frozen tape ----")
     CSSPJ = timed_compile("ssp_jvp", () -> RX.@compile compile_options=COPTS ssp_jvp(U_R, U_R, THT, THT, T_R, DTT_R))
-    CROSJ = timed_compile("ros_jvp", () -> RX.@compile compile_options=COPTS ros_jvp(U_R, U_R, THC, THC, T_R, DTC_R))
+    CROSJ = timed_compile("ros_jvp", () -> RX.@compile compile_options=COPTS ros_jvp(U_R, U_R, THCX, THCX, T_R, DTC_R))
 
     zh_T = _zero_like((p = p, bufs = host_bufs[1]))
-    zh_C = _zero_like(thC(p, host_bufs[2], host_bufsJ))
+    # tf = 0 in the tangent: the forcing time is not differentiated
+    zh_C = _zero_like(_with_tf(thC(p, host_bufs[2], host_bufsJ), 0.0))
     # `merge`, not a literal (p=..., bufs=...): the chemistry theta has a third
     # field under jac=:sym and a literal would silently drop it.
     onehot_dth(zh, k::Symbol) =
@@ -1612,7 +1681,7 @@ if want("ref") && want("adj")
     # SAME state answers that, and it is one call.
     if BADREC[] !== nothing
         b = BADREC[]; ischem = startswith(b.label, "chem")
-        cj = ischem ? CROSJ : CSSPJ; TH = ischem ? THC : THT
+        cj = ischem ? CROSJ : CSSPJ; TH = b.th
         zh = ischem ? zh_C : zh_T
         dth0 = _todev(zh)                                 # zero theta tangent
         duv = randn(Random.MersenneTwister(4242), N) .* max.(abs.(b.u), 1e-12)
@@ -1630,7 +1699,8 @@ if want("ref") && want("adj")
     # is in the CHAINING, not in the step derivative.
     let (tpT1, tpC1, _) = (refresh_forcing(CKPTS[1].epoch); tapes_for(1))
         for (nm, cj, cv, tp, TH, zh) in (("SSPRK43", CSSPJ, CSSPV, tpT1, THT, zh_T),
-                                         ("ROS23",   CROSJ, CROSV, tpC1, THC, zh_C))
+                                         ("ROS23",   CROSJ, CROSV, tpC1,
+                                          chem_theta(THC, CKPTS[1].tf), zh_C))
             e = tp[end]
             rng = Random.MersenneTwister(90210)
             scu = max.(abs.(e.u), 1e-12)
@@ -1665,7 +1735,7 @@ if want("ref") && want("adj")
             tpT, tpC, _ = tapes_for(kk)
             du = forward_stage(CSSPJ, tpT, du, THT, dTHT)   # transport first, forward order
             kk == 1 && @printf("    [%s] ||du|| after macro 1 transport = %.6e\n", nm, norm(du))
-            du = forward_stage(CROSJ, tpC, du, THC, dTHC)
+            du = forward_stage(CROSJ, tpC, du, chem_theta(THC, CKPTS[kk].tf), dTHC)
             @printf("    [%s] ||du|| after macro %d = %.6e   dot(w,du) = %.12e\n",
                     nm, kk, norm(du), dot(WOBJ, du))
         end
@@ -1708,7 +1778,8 @@ if want("fdtape") && want("adj")
         u = copy(UBASE)
         for ck in CKPTS
             refresh_forcing_if_needed(ck.epoch)
-            u, _, _ = replay_fixed(u, ck.seqT, ck.seqC; TH_T = THT_, TH_C = THC_, record = false)
+            u, _, _ = replay_fixed(u, ck.seqT, ck.seqC; TH_T = THT_,
+                                   TH_C = chem_theta(THC_, ck.tf), record = false)
         end
         return dot(WOBJ, u)
     end

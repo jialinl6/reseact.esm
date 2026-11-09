@@ -91,6 +91,10 @@
 #                                runner defaulted to before 2026-08-21; ad is
 #                                exact coloured forward-mode JVPs. See 1b.
 #   RESEACT_RXFIX                XLA:CPU race workaround (1 = default, on)
+#   RESEACT_FORCING_TIME         stage (default) | midstep -- chemistry inputs at each
+#                                stage time, or at the macro-step midpoint (D-GC; see
+#                                run_reseact.jl). A macro step here is one stop-grid
+#                                interval, so the midpoint is that interval's.
 #
 # Helper code it pulls in (see HELPERS.md for the migration plan):
 #   prototypes/reseact_3d_chem/{split_common,blockdiag_local,block_jac}.jl
@@ -331,15 +335,31 @@ if SYMJAC
         w <= 1e-12 || error("RXJAC=sym: the gather plan does not reproduce the Jacobian")
     end
 end
+# RESEACT_FORCING_TIME=midstep (D-GC) evaluates the chemistry's time-dependent inputs
+# at the macro step's midpoint for every RHS and Jacobian call in it, instead of at
+# each stage time; see run_reseact.jl where `fc` is built. Transport is unchanged.
+# THE MIDPOINT TRAVELS IN `aux`, the loop-carried operand of the chemistry
+# `stablehlo.while`. Captured by the closures instead, it fails MLIR verification
+# ("expect operands to be compatible with body block arguments"): a traced value
+# captured by a traced while body is not one of its block arguments.
+const FORCING_TIME = get(ENV, "RESEACT_FORCING_TIME", "stage")
+FORCING_TIME in ("stage", "midstep") ||
+    error("RESEACT_FORCING_TIME must be stage or midstep, got $FORCING_TIME")
+const FORCING_MID = FORCING_TIME == "midstep"
+say("  chemistry time-dependent inputs at: " *
+    (FORCING_MID ? "the macro-step midpoint (RESEACT_FORCING_TIME=midstep, D-GC)" :
+                   "each stage time (RESEACT_FORCING_TIME=stage)"))
 adv = let gT = g4[1], gC = g4[2], NS = NS, NC = NC, masks = masks,
-         PLAN = PLAN, gjbJ = gjbJ, SYMJAC = SYMJAC
+         PLAN = PLAN, gjbJ = gjbJ, SYMJAC = SYMJAC, FORCING_MID = FORCING_MID
     (uR, pR, t0R, t1R, dtTR, dtCR, bufsT, bufsC, bufsJ) -> begin
+        tmidR = (t0R + t1R) / 2
         fT = (u, t, dtc, aux) -> RxTracedIntegrator.ssprk43_step(
             (uu, tt) -> gT(uu, aux.p, tt, aux.bufs), u, t, dtc, ATOL_T, RTOL)
         uT, _, dtTend, naT, nrT = RxTracedIntegrator.adaptive_solve(
             fT, uR, t0R, t1R, dtTR, CTRL_T, (p = pR, bufs = bufsT); clamp_nonneg = true)
         fC = (u, t, dtc, aux) -> RxTracedIntegrator.ros23_step(
-            (uu, tt) -> gC(uu, aux.p, tt, aux.bufs), u, t, dtc, NS, NC, masks, ATOL_C, RTOL;
+            (uu, tt) -> gC(uu, aux.p, FORCING_MID ? aux.tmid : tt, aux.bufs), u, t, dtc,
+            NS, NC, masks, ATOL_C, RTOL;
             # The host-unrolled Jacobian emits 16 traced copies of the chem RHS per
             # step against the traced loop's 4. That used to make it compile-
             # intractable at CONUS -- XLA's `cse_slice` pattern is pairwise over
@@ -368,11 +388,13 @@ adv = let gT = g4[1], gC = g4[2], NS = NS, NC = NC, masks = masks,
             # Jacobian's meteorology advances with the RHS's rather than being
             # baked in at the trace.
             symjac = SYMJAC ?
-                ((uu, tt) -> block_jac(PLAN, gjbJ(gather_uj(PLAN, uu), aux.p, tt, aux.bufsJ))) :
+                ((uu, tt) -> block_jac(PLAN, gjbJ(gather_uj(PLAN, uu), aux.p,
+                                                  FORCING_MID ? aux.tmid : tt, aux.bufsJ))) :
                 nothing)
         uC, _, dtCend, naC, nrC = RxTracedIntegrator.adaptive_solve(
             fC, uT, t0R, t1R, dtCR, CTRL_C,
-            SYMJAC ? (p = pR, bufs = bufsC, bufsJ = bufsJ) : (p = pR, bufs = bufsC);
+            SYMJAC ? (p = pR, bufs = bufsC, bufsJ = bufsJ, tmid = tmidR) :
+                     (p = pR, bufs = bufsC, tmid = tmidR);
             clamp_nonneg = true)
         return uC, naT, nrT, naC, nrC, dtTend, dtCend
     end

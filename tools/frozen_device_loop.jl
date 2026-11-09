@@ -71,7 +71,12 @@ function dev_body(half::Symbol)
 end
 
 const DEVPROGS = Dict{Tuple{Symbol,Symbol,Int,Bool},Any}()
+# The theta a call runs with, by default. For the chemistry that is the BARE THC,
+# so under RESEACT_FORCING_TIME=midstep a caller that does not pass the macro
+# step's `chem_theta(THC, ck.tf)` gets a type mismatch, not a stale forcing time.
 dev_th(half::Symbol) = half === :T ? THT : THC
+# The theta a program is COMPILED (or traced) on: shapes only.
+dev_th_example(half::Symbol) = half === :T ? THT : THCX
 
 """
     dev_prog(kind, half, cap)
@@ -84,7 +89,7 @@ function dev_prog(kind::Symbol, half::Symbol, cap::Int)
     key = (kind, half, cap, CLAMP[])
     haskey(DEVPROGS, key) && return DEVPROGS[key]
     bodyf = dev_body(half)
-    TH = dev_th(half)
+    TH = dev_th_example(half)
     # Shapes only -- every value here is a runtime operand.
     TSR = RX.ConcreteRArray(zeros(Float64, cap))
     DTSR = RX.ConcreteRArray(ones(Float64, cap))
@@ -203,7 +208,7 @@ function devloop_replay_window(THT_, THC_)
     for ck in CKPTS
         refresh_forcing_if_needed(ck.epoch)
         u = devloop_replay(:T, u, ck.seqT; TH = THT_)
-        u = devloop_replay(:C, u, ck.seqC; TH = THC_)
+        u = devloop_replay(:C, u, ck.seqC; TH = chem_theta(THC_, ck.tf))
     end
     return dot(WOBJ, u)
 end
@@ -215,7 +220,7 @@ end
 function devloop_dump_structure(half::Symbol, caps = (32, 128))
     say("\n---- DEVLOOP structure: the differentiated module of half $(half) ----")
     bodyf = dev_body(half)
-    TH = dev_th(half)
+    TH = dev_th_example(half)
     for cap in caps
         TSR = RX.ConcreteRArray(zeros(Float64, cap))
         DTSR = RX.ConcreteRArray(ones(Float64, cap))

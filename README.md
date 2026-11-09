@@ -253,7 +253,9 @@ matter: `RESEACT_RES` (GEOS-FP resolution), `RESEACT_NLON/NLAT/NLEV` and
 `RESEACT_ADJ_SHARDS` (chemistry worker processes, default 8, 0 = single process),
 `RESEACT_ADJ_JAC` (`sym`), `RESEACT_ADJ_STAGES` (`fwd,adj[,ref,fdtape]`),
 `RESEACT_ADJ_OBJ` (objective, default `SuperFast.O3:surf`), `RESEACT_LABEL`,
-`RESEACT_ADJ_CSV` (gradient output). The runner prints a **provenance block** at
+`RESEACT_ADJ_CSV` (gradient output), `RESEACT_FORCING_TIME` (`stage`, the default, or
+`midstep`: the chemistry's time-dependent inputs at the macro-step midpoint, as
+GEOS-Chem does; all three runners take it, see `HELPERS.md`). The runner prints a **provenance block** at
 start — the git HEAD and dirty state of this repo and of every developed sibling — so
 a logged result can be tied to commits.
 

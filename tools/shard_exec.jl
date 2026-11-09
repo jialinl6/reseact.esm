@@ -38,8 +38,9 @@
 #   exec_build!(ex, k, cfg, ca,
 #               pshapes, lanes)       -> binfo  (ShardKernel.build!)
 #   exec_refresh!(ex, k, lanes)       -> nothing (ShardKernel.refresh!)
-#   exec_step(ex, k, uc, t, dt)       -> (unew, sse, seconds)
-#   exec_vjp(ex, k, uc, lamc, t, dt)  -> (lam_in, dJdp over pkeys, seconds)
+#   exec_step(ex, k, uc, t, dt, tf)   -> (unew, sse, seconds)
+#   exec_vjp(ex, k, uc, lamc, t, dt, tf)
+#                                     -> (lam_in, dJdp over pkeys, seconds)
 #   exec_footprint(ex)                -> String, one line of memory accounting
 #   exec_shutdown!(ex)                release the slots
 #
@@ -85,7 +86,14 @@
 #     its own fan-out wall to get "host round-trip + imbalance". An executor
 #     that returns 0.0 here still runs correctly, but that diagnostic dies.
 #
-#  6. NO DRIVER STATE. An executor may not read the driver's `merged_param`,
+#  6. THE FORCING TIME. `tf` is the time the chemistry reads its time-dependent
+#     inputs at under RESEACT_FORCING_TIME=midstep -- the macro step's midpoint,
+#     the same for every step and VJP of that macro step -- and NaN under
+#     `stage`, where the shard ignores it. It arrives with every call, like `t`
+#     and `dt`, so a shard holds no forcing-time state and a replay or VJP of a
+#     macro step cannot see another step's.
+#
+#  7. NO DRIVER STATE. An executor may not read the driver's `merged_param`,
 #     `p`, `UBASE` or any other driver global. Everything it needs arrives in
 #     `cfg` / `ca` / `pshapes` / `lanes`. This is what makes a remote or
 #     device slot possible at all.
@@ -231,10 +239,12 @@ exec_build!(ex::ProcessExecutor, k::Int, cfg::Dict, ca::Dict{String,Any},
     _rpc(ex.pids[k], :shard_build!, cfg, ca, pshapes, lanes)
 exec_refresh!(ex::ProcessExecutor, k::Int, lanes::Dict{String,Any}) =
     _rpc(ex.pids[k], :shard_refresh!, lanes)
-exec_step(ex::ProcessExecutor, k::Int, uc::Vector{Float64}, t::Float64, dt::Float64) =
-    _rpc(ex.pids[k], :shard_step, uc, t, dt)
+exec_step(ex::ProcessExecutor, k::Int, uc::Vector{Float64}, t::Float64, dt::Float64,
+          tf::Float64) =
+    _rpc(ex.pids[k], :shard_step, uc, t, dt, tf)
 exec_vjp(ex::ProcessExecutor, k::Int, uc::Vector{Float64}, lamc::Vector{Float64},
-         t::Float64, dt::Float64) = _rpc(ex.pids[k], :shard_vjp, uc, lamc, t, dt)
+         t::Float64, dt::Float64, tf::Float64) =
+    _rpc(ex.pids[k], :shard_vjp, uc, lamc, t, dt, tf)
 
 function exec_footprint(ex::ProcessExecutor)
     rss = [_rpc(pid, :shard_rss) for pid in ex.pids]
@@ -299,10 +309,12 @@ exec_build!(ex::InProcessExecutor, k::Int, cfg::Dict, ca::Dict{String,Any},
     ShardKernel.build!(ex.states[k], cfg, ca, pshapes, lanes)
 exec_refresh!(ex::InProcessExecutor, k::Int, lanes::Dict{String,Any}) =
     ShardKernel.refresh!(ex.states[k], lanes)
-exec_step(ex::InProcessExecutor, k::Int, uc::Vector{Float64}, t::Float64, dt::Float64) =
-    ShardKernel.chem_step(ex.states[k], uc, t, dt)
+exec_step(ex::InProcessExecutor, k::Int, uc::Vector{Float64}, t::Float64, dt::Float64,
+          tf::Float64) =
+    ShardKernel.chem_step(ex.states[k], uc, t, dt, tf)
 exec_vjp(ex::InProcessExecutor, k::Int, uc::Vector{Float64}, lamc::Vector{Float64},
-         t::Float64, dt::Float64) = ShardKernel.chem_vjp(ex.states[k], uc, lamc, t, dt)
+         t::Float64, dt::Float64, tf::Float64) =
+    ShardKernel.chem_vjp(ex.states[k], uc, lamc, t, dt, tf)
 
 exec_footprint(ex::InProcessExecutor) =
     @sprintf("one process, RSS %.1f GB holding all %d shards", ShardKernel.rss_gb(),

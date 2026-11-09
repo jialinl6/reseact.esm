@@ -73,6 +73,9 @@
 #   RESEACT_MACRO_DT   Lie-Trotter interval, s        (default 300)
 #   RESEACT_MIN_MACRO_DT  bisection floor, s          (default 9 = five halvings)
 #   RESEACT_JAC        "ad" (default) or "fd"         chemistry block Jacobian
+#   RESEACT_FORCING_TIME  "stage" (default) or "midstep" (D-GC): when the chemistry
+#                      evaluates its time-dependent inputs -- at each stage time, or
+#                      once at the macro step's midpoint (see where `fc` is built)
 #   RESEACT_ZARR       gridded output store           (default: none)
 #   RESEACT_OUT_EVERY  write one record every N macro steps  (default 12 = hourly)
 #   RESEACT_FLUSH_EVERY  commit the sink every N written records (default 12)
@@ -269,7 +272,41 @@ ohrng = P.base_pos["SuperFast.OH"]:P.NS:P.N
 no2rng = P.base_pos["SuperFast.NO2"]:P.NS:P.N
 
 tgz(g, u, p, t) = (fill!(g, 0); nothing)   # chem tgrad is zero (autonomous over a step)
-fc = SciMLBase.ODEFunction(f_chem_cm!; jac = jac_cm!, jac_prototype = mkjp(), tgrad = tgz)
+# WHEN THE CHEMISTRY SEES ITS TIME-DEPENDENT INPUTS. "stage" (the default) evaluates the
+# time-blended GEOS-FP fields, the sun angle and Fast-JX photolysis, the emissions and the
+# rate constants they feed at every Rosenbrock stage time. "midstep" (D-GC) evaluates them
+# ONCE per macro step, at its midpoint, for every chemistry RHS and Jacobian call in it --
+# what GEOS-Chem does over its chemistry timestep (fullchem: Update_RCONST once per box
+# before KPP's Integrate, ICNTRL(15) = -1 so no per-call updates, photolysis at
+# SUNCOS_MID). The chemistry is then autonomous over the step, so tgz above is exact.
+# Transport is unchanged in both. Measured at CONUS 13x7x30, 1 day, 8 threads: time loop
+# 232.0 -> 125.9 s, chemistry steps 9,092 -> 5,140; surface O3 mean -8e-5 ppb (max
+# 0.017 ppb), NO2 RMS relative 0.17 %.
+const FORCING_TIME = get(ENV, "RESEACT_FORCING_TIME", "stage")
+FORCING_TIME in ("stage", "midstep") ||
+    error("RESEACT_FORCING_TIME must be stage or midstep, got $FORCING_TIME")
+const TFORCE = Ref(NaN)          # the current macro step's midpoint, set in the loop below
+f_chem_run!, jac_run! = FORCING_TIME == "midstep" ?
+    let f = f_chem_cm!, j = jac_cm!
+        ((du, u, p, t) -> f(du, u, p, TFORCE[]), (J, u, p, t) -> j(J, u, p, TFORCE[]))
+    end : (f_chem_cm!, jac_cm!)
+say("    chemistry time-dependent inputs at: " *
+    (FORCING_TIME == "midstep" ? "the macro-step midpoint (RESEACT_FORCING_TIME=midstep, D-GC)" :
+                                 "each stage time (RESEACT_FORCING_TIME=stage)"))
+# `lie_trotter_solve` refreshes the forcing at any GEOS-FP boundary INSIDE a macro
+# step, and the rest of that step would then read the step's midpoint against a
+# bracket that no longer contains it. The default lattice (T0 on the cadence,
+# MACRO_DT dividing 1800) puts every boundary on a macro edge; refuse one that does not.
+if FORCING_TIME == "midstep"
+    let inside = [b for b in run.tstops if T0 + 1e-6 < b < T_END - 1e-6 &&
+                                           abs(rem(b - T0, MACRO_DT, RoundNearest)) > 1e-6]
+        isempty(inside) ||
+            error("RESEACT_FORCING_TIME=midstep: $(length(inside)) GEOS-FP refresh times fall " *
+                  "inside a macro step (first at t=$(first(inside))); pick RESEACT_T0 / " *
+                  "RESEACT_MACRO_DT so every refresh lands on a macro-step edge")
+    end
+end
+fc = SciMLBase.ODEFunction(f_chem_run!; jac = jac_run!, jac_prototype = mkjp(), tgrad = tgz)
 inner_algs = (OrdinaryDiffEqSSPRK.SSPRK43(),
               OrdinaryDiffEqRosenbrock.Rosenbrock23(autodiff = false, linsolve = LU))
 # Forcing refresh at cadence boundaries: rewrite the live buffers in
@@ -377,6 +414,10 @@ t = T0
 while t < T_END - 1e-9
     global nstep += 1
     tnext = min(t + MACRO_DT, T_END)
+    # Read only under RESEACT_FORCING_TIME=midstep. A bisected macro step keeps the
+    # midpoint of the WHOLE step [t, tnext] for both halves: the retry exists to get
+    # the same map through the solver, not to change the chemistry's inputs.
+    TFORCE[] = t + (tnext - t) / 2
     res = lie_trotter_solve_bisect(f_trans_cm!, fc, u, (t, tnext), run.p, inner_algs;
         macro_dt = tnext - t, min_macro_dt = MIN_MACRO_DT,
         reltols = (RTOL, RTOL), abstols = (ATOL_T, ATOL),

@@ -10,8 +10,14 @@
 #   prepare_doc!(cfg)                 -> (st, info)   the capacity document
 #   build!(st, cfg, ca, pshapes, l0)  -> binfo        build + Jacobian + compile
 #   refresh!(st, lanes)                               new forcing for its lanes
-#   chem_step(st, uc, t, dt)          -> (unew, sse, seconds)
-#   chem_vjp(st, uc, lamc, t, dt)     -> (lam_in, dJdp over pkeys, seconds)
+#   chem_step(st, uc, t, dt, tf)      -> (unew, sse, seconds)
+#   chem_vjp(st, uc, lamc, t, dt, tf) -> (lam_in, dJdp over pkeys, seconds)
+#
+# `tf` is the chemistry's forcing time under RESEACT_FORCING_TIME=midstep (the
+# driver's `cfg["FORCING_MID"]`): the macro step's midpoint, at which every RHS
+# and Jacobian call of that step reads its time-dependent inputs. It rides in the
+# step's theta exactly as it does on the driver (tools/adjoint_gradient.jl,
+# `chem_theta`), so it is a Const of the VJP. Under `stage` it is ignored (NaN).
 #
 # Until 2026-09-08 this code lived inside tools/shard_worker.jl and could only
 # be reached over a Distributed socket, which welded the DECOMPOSITION (which
@@ -122,16 +128,20 @@ mutable struct ShardState
     cvjp
     docCAP0
     cd
+    fmid::Bool              # RESEACT_FORCING_TIME=midstep: the chemistry reads th.tf
     ShardState(wid::Int, C::Int, NS::Int) =
         new(wid, C, NS, nothing, Dict{String,Any}(), nothing, Float64[],
             nothing, Symbol[], Dict{String,Int}(), Int[], nothing,
             nothing, nothing, nothing, nothing, nothing, nothing,
-            nothing, nothing, nothing, nothing)
+            nothing, nothing, nothing, nothing, false)
 end
 
 wsay(st::ShardState, s) = (println("  [shard $(st.wid)] " * s); flush(stdout))
 
 _devp(pp::NamedTuple) = NamedTuple{keys(pp)}(map(RX.ConcreteRNumber, values(pp)))
+# The theta of one call: `st.th` plus the forcing time under midstep, `st.th`
+# itself under stage (so the stage programs compile exactly as they did).
+_th_at(st, tf::Float64) = st.fmid ? merge(st.th, (tf = RX.ConcreteRNumber(tf),)) : st.th
 
 """
     prepare_doc!(cfg) -> (st, info)
@@ -244,12 +254,15 @@ function build!(st::ShardState, cfg::Dict, ca::Dict{String,Any},
     st.dev_bufs  = map(RX.ConcreteRArray, RXR.rx_bufs(f))
     st.dev_bufsJ = map(RX.ConcreteRArray, RXR.rx_bufs(st.band.fJ))
     st.th = (p = _devp(pc), bufs = st.dev_bufs, bufsJ = st.dev_bufsJ)
+    st.fmid = get(cfg, "FORCING_MID", false)::Bool
 
     frhs = RXR.rx_rhs(f; var_map = vmc)
     plan = st.plan; gjb = st.gjb; masks = st.masks
     atol = cfg["ATOL_C"]::Float64; rtol = cfg["RTOL"]::Float64; jacmode = cfg["JACMODE"]::Symbol
-    gC(u, th, t) = frhs(u, th.p, t, th.bufs)
-    gJ(u, th, t) = RSBJ.block_jac(plan, gjb(RSBJ.gather_uj(plan, u), th.p, t, th.bufsJ))
+    fmid = st.fmid
+    tchem(th, t) = fmid ? th.tf : t
+    gC(u, th, t) = frhs(u, th.p, tchem(th, t), th.bufs)
+    gJ(u, th, t) = RSBJ.block_jac(plan, gjb(RSBJ.gather_uj(plan, u), th.p, tchem(th, t), th.bufsJ))
     stepfn(u, th, t, dt) = RTI.ros23_step((uu, tt) -> gC(uu, th, tt), u, t, dt,
                                           NS, C, masks, atol, rtol;
                                           unrolled = true, jac = jacmode,
@@ -261,8 +274,9 @@ function build!(st::ShardState, cfg::Dict, ca::Dict{String,Any},
     copts = shard_copts(cfg)
     UD = RX.ConcreteRArray(copy(u0c)); LD = RX.ConcreteRArray(zeros(NS * C))
     TD = RX.ConcreteRNumber(cfg["T0"]); DD = RX.ConcreteRNumber(cfg["DT0C"])
+    THX = _th_at(st, Float64(cfg["T0"]))      # shapes only, and the base-point check's theta
     tc = time()
-    st.cstep = RX.@compile compile_options=copts stepfn(UD, st.th, TD, DD)
+    st.cstep = RX.@compile compile_options=copts stepfn(UD, THX, TD, DD)
     tcs = time() - tc
     memlog(st, "compile step")
 
@@ -281,7 +295,7 @@ function build!(st::ShardState, cfg::Dict, ca::Dict{String,Any},
     # right-hand side at the base point is a non-finite step at the base
     # point. The price is that it fires after the step compiles rather than
     # before, which costs a diagnosis its earliest moment and nothing else.
-    let res = st.cstep(RX.ConcreteRArray(copy(u0c)), st.th,
+    let res = st.cstep(RX.ConcreteRArray(copy(u0c)), THX,
                        RX.ConcreteRNumber(cfg["T0"]), RX.ConcreteRNumber(cfg["DT0C"]))
         un = Array(res[1]); ce = Array(res[3])
         nb = count(!isfinite, un) + count(!isfinite, ce)
@@ -294,7 +308,7 @@ function build!(st::ShardState, cfg::Dict, ca::Dict{String,Any},
     tcv = 0.0
     if cfg["want_vjp"]
         tc = time()
-        st.cvjp = RX.@compile compile_options=copts vjpfn(UD, st.th, LD, TD, DD)
+        st.cvjp = RX.@compile compile_options=copts vjpfn(UD, THX, LD, TD, DD)
         tcv = time() - tc
         memlog(st, "compile vjp")
     end
@@ -420,7 +434,7 @@ function from_cap(st::ShardState, vc::Vector{Float64})
 end
 
 """
-    chem_step(st, uc, t, dt) -> (unew, sse, seconds)
+    chem_step(st, uc, t, dt, tf) -> (unew, sse, seconds)
 
 `sse` is the SUM over this shard's states of the squared scaled residual --
 `NS * sum(cell_err.^2)`, i.e. the partial sum the global `EEst = sqrt(sse/N)`
@@ -428,9 +442,9 @@ reduces over -- so the caller can rebuild the global norm exactly up to
 reassociation. See tools/shard_exec.jl: that is a contract every executor owes,
 not an implementation detail of this one.
 """
-function chem_step(st::ShardState, uc::Vector{Float64}, t::Float64, dt::Float64)
+function chem_step(st::ShardState, uc::Vector{Float64}, t::Float64, dt::Float64, tf::Float64)
     td = time()
-    res = st.cstep(RX.ConcreteRArray(to_cap(st, uc)), st.th, RX.ConcreteRNumber(t),
+    res = st.cstep(RX.ConcreteRArray(to_cap(st, uc)), _th_at(st, tf), RX.ConcreteRNumber(t),
                    RX.ConcreteRNumber(dt))
     raw = Array(res[1]); ce = Array(res[3])
     tdev = time() - td
@@ -440,12 +454,12 @@ function chem_step(st::ShardState, uc::Vector{Float64}, t::Float64, dt::Float64)
 end
 
 """
-    chem_vjp(st, uc, lamc, t, dt) -> (lambda_in, dJdp over pkeys, seconds)
+    chem_vjp(st, uc, lamc, t, dt, tf) -> (lambda_in, dJdp over pkeys, seconds)
 """
 function chem_vjp(st::ShardState, uc::Vector{Float64}, lamc::Vector{Float64},
-             t::Float64, dt::Float64)
+             t::Float64, dt::Float64, tf::Float64)
     td = time()
-    r = st.cvjp(RX.ConcreteRArray(to_cap(st, uc)), st.th, RX.ConcreteRArray(to_cap(st, lamc)),
+    r = st.cvjp(RX.ConcreteRArray(to_cap(st, uc)), _th_at(st, tf), RX.ConcreteRArray(to_cap(st, lamc)),
                 RX.ConcreteRNumber(t), RX.ConcreteRNumber(dt))
     lin = Array(r[1]); gp = r[2].p
     tdev = time() - td

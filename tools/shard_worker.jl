@@ -79,11 +79,11 @@ shard_build!(cfg::Dict, ca::Dict{String,Any}, pshapes::Dict{String,Any},
 
 shard_refresh!(lanes::Dict{String,Any}) = ShardKernel.refresh!(S[], lanes)
 
-shard_step(uc::Vector{Float64}, t::Float64, dt::Float64) =
-    ShardKernel.chem_step(S[], uc, t, dt)
+shard_step(uc::Vector{Float64}, t::Float64, dt::Float64, tf::Float64) =
+    ShardKernel.chem_step(S[], uc, t, dt, tf)
 
-shard_vjp(uc::Vector{Float64}, lamc::Vector{Float64}, t::Float64, dt::Float64) =
-    ShardKernel.chem_vjp(S[], uc, lamc, t, dt)
+shard_vjp(uc::Vector{Float64}, lamc::Vector{Float64}, t::Float64, dt::Float64, tf::Float64) =
+    ShardKernel.chem_vjp(S[], uc, lamc, t, dt, tf)
 
 shard_pid() = getpid()
 shard_rss() = ShardKernel.rss_gb()

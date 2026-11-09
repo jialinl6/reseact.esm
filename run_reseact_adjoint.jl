@@ -782,6 +782,11 @@ const REPO = @__DIR__
 const DEMO = lowercase(get(ENV, "RESEACT_DEMO", "adjoint"))
 DEMO in ("adjoint", "forward", "both") ||
     error("RESEACT_DEMO must be adjoint|forward|both, got \"$DEMO\"")
+# Read here only for the banner; each arm reads it itself (the forward arm refuses
+# midstep, see tools/sensitivity_forward.jl).
+const FORCING_TIME = get(ENV, "RESEACT_FORCING_TIME", "stage")
+FORCING_TIME in ("stage", "midstep") ||
+    error("RESEACT_FORCING_TIME must be stage or midstep, got $FORCING_TIME")
 
 # ---- Production defaults: FIVE DAYS OF CONUS --------------------------------
 # CONUS at the native GEOS-FP 4x5 resolution -- 13x7x72, 85,176 states, the same
@@ -967,6 +972,10 @@ say("  block Jacobian: $(ENV["RESEACT_ADJ_JAC"])" *
 say("  base point    : " * (ENV["RESEACT_ADJ_UJITTER"] == "0" ?
     "un-jittered (the real trajectory; jitter is for FD checks)" :
     "jittered $(ENV["RESEACT_ADJ_UJITTER"]) relative (PPM limiter; see header)"))
+say("  forcing time  : " *
+    (FORCING_TIME == "midstep" ?
+        "midstep -- chemistry inputs at the macro-step midpoint (D-GC; adjoint arm only)" :
+        "stage -- chemistry inputs at each stage time"))
 say("  chem shards   : $(ENV["RESEACT_ADJ_SHARDS"])" *
     (ENV["RESEACT_ADJ_SHARDS"] == "0" ? "  (single process)" : "  (worker processes, ~3 cores + ~4 GB each)"))
 # PROVENANCE. The Julia environment develops the EarthSci packages from sibling

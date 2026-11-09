@@ -235,7 +235,8 @@ function build_shards(n::Int; executor::ShardExecutor = make_shard_executor())
     S0 = ShardSet(executor, n, ranges, Cs, metas, pas, cells, geom, Vector{Int}[], ShardStats())
     cfg2 = Dict{String,Any}("ov" => ov, "spnames" => spnames, "T0" => T0, "DT0C" => DT0C,
                             "ATOL_C" => ATOL_C, "RTOL" => RTOL, "JACMODE" => JACMODE,
-                            "XLAFIX" => XLAFIX, "EXCLP" => EXCLP, "want_vjp" => want("adj"))
+                            "XLAFIX" => XLAFIX, "EXCLP" => EXCLP, "want_vjp" => want("adj"),
+                            "FORCING_MID" => FORCING_MID)
     # THE GATHER-PLAN CHECK IS PER CAPACITY SIZE, NOT PER SHARD. It validates
     # index algebra -- the plan's padded gather and its per-block slot lists
     # against the band evaluator's own `umap` and `scatter` -- and two shards
@@ -288,8 +289,9 @@ function build_shards(n::Int; executor::ShardExecutor = make_shard_executor())
     # the timed forward pass / backward sweep. Measured at 6x6x8: ~5 s of the
     # first window's wall was this. The results are discarded.
     tw = time()
-    shard_step(S, copy(UBASE), T0, DT0C)
-    want("adj") && shard_vjp(S, copy(UBASE), copy(WOBJ), T0, DT0C)
+    tf1 = tforce(T0, T0 + MACRO_DT)          # the first macro step's forcing time
+    shard_step(S, copy(UBASE), T0, DT0C, tf1)
+    want("adj") && shard_vjp(S, copy(UBASE), copy(WOBJ), T0, DT0C, tf1)
     S.stats = ShardStats()
     say(@sprintf("  warm-up step%s %.1f s", want("adj") ? " + VJP" : "", time() - tw))
     say(@sprintf("  SHARDS READY in %.1f s", time() - tsp))
@@ -325,19 +327,20 @@ function _unpack!(u::Vector{Float64}, S::ShardSet, k::Int, uc::Vector{Float64})
 end
 
 """
-    shard_step(S, u, t, dt) -> (unew, EEst)
+    shard_step(S, u, t, dt, tf) -> (unew, EEst)
 
 One chemistry step of the whole domain, fanned out over the shards. `EEst` is
 `sqrt(sum_k sse_k / N)`, the per-shard partial sums added IN SHARD ORDER --
-invariant 2 of the executor contract (tools/shard_exec.jl).
+invariant 2 of the executor contract (tools/shard_exec.jl). `tf` is the forcing
+time under RESEACT_FORCING_TIME=midstep (NaN under stage; invariant 6).
 """
-function shard_step(S::ShardSet, u::Vector{Float64}, t::Float64, dt::Float64)
+function shard_step(S::ShardSet, u::Vector{Float64}, t::Float64, dt::Float64, tf::Float64)
     st = S.stats; n = S.n
     tp = time()
     ucs = [_pack(S, k, u) for k in 1:n]
     st.t_pack += time() - tp
     tr = time()
-    res = exec_map(S.ex, k -> exec_step(S.ex, k, ucs[k], t, dt), 1:n)
+    res = exec_map(S.ex, k -> exec_step(S.ex, k, ucs[k], t, dt, tf), 1:n)
     st.t_rpc += time() - tr
     tp = time()
     unew = Vector{Float64}(undef, N)
@@ -353,16 +356,17 @@ function shard_step(S::ShardSet, u::Vector{Float64}, t::Float64, dt::Float64)
 end
 
 """
-    shard_vjp(S, u, lam, t, dt) -> (lambda_in, dJdp aligned with PNAMES)
+    shard_vjp(S, u, lam, t, dt, tf) -> (lambda_in, dJdp aligned with PNAMES)
 """
-function shard_vjp(S::ShardSet, u::Vector{Float64}, lam::Vector{Float64}, t::Float64, dt::Float64)
+function shard_vjp(S::ShardSet, u::Vector{Float64}, lam::Vector{Float64}, t::Float64,
+                   dt::Float64, tf::Float64)
     st = S.stats; n = S.n
     tp = time()
     ucs = [_pack(S, k, u) for k in 1:n]
     lcs = [_pack(S, k, lam) for k in 1:n]
     st.t_pack += time() - tp
     tr = time()
-    res = exec_map(S.ex, k -> exec_vjp(S.ex, k, ucs[k], lcs[k], t, dt), 1:n)
+    res = exec_map(S.ex, k -> exec_vjp(S.ex, k, ucs[k], lcs[k], t, dt, tf), 1:n)
     st.t_rpc += time() - tr
     tp = time()
     lin = Vector{Float64}(undef, N)

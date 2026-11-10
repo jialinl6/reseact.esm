@@ -782,9 +782,11 @@ const REPO = @__DIR__
 const DEMO = lowercase(get(ENV, "RESEACT_DEMO", "adjoint"))
 DEMO in ("adjoint", "forward", "both") ||
     error("RESEACT_DEMO must be adjoint|forward|both, got \"$DEMO\"")
-# Read here only for the banner; each arm reads it itself (the forward arm refuses
-# midstep, see tools/sensitivity_forward.jl).
-const FORCING_TIME = get(ENV, "RESEACT_FORCING_TIME", "stage")
+# Read here only for the banner; each arm reads it itself. midstep is the default;
+# the forward arm is not wired for it, so it runs stage when the switch is unset and
+# refuses an explicit midstep (see tools/sensitivity_forward.jl).
+const FORCING_SET  = haskey(ENV, "RESEACT_FORCING_TIME")
+const FORCING_TIME = get(ENV, "RESEACT_FORCING_TIME", "midstep")
 FORCING_TIME in ("stage", "midstep") ||
     error("RESEACT_FORCING_TIME must be stage or midstep, got $FORCING_TIME")
 
@@ -974,8 +976,10 @@ say("  base point    : " * (ENV["RESEACT_ADJ_UJITTER"] == "0" ?
     "jittered $(ENV["RESEACT_ADJ_UJITTER"]) relative (PPM limiter; see header)"))
 say("  forcing time  : " *
     (FORCING_TIME == "midstep" ?
-        "midstep -- chemistry inputs at the macro-step midpoint (D-GC; adjoint arm only)" :
-        "stage -- chemistry inputs at each stage time"))
+        "midstep -- chemistry inputs at the macro-step midpoint, as GEOS-Chem over its chemistry step" *
+        (DEMO == "adjoint" ? "" :
+         FORCING_SET ? " (the forward arm refuses it)" : " (the forward arm runs stage)") :
+        "stage -- chemistry inputs at each stage time, the exact reference"))
 say("  chem shards   : $(ENV["RESEACT_ADJ_SHARDS"])" *
     (ENV["RESEACT_ADJ_SHARDS"] == "0" ? "  (single process)" : "  (worker processes, ~3 cores + ~4 GB each)"))
 # PROVENANCE. The Julia environment develops the EarthSci packages from sibling

@@ -253,14 +253,25 @@ matter: `RESEACT_RES` (GEOS-FP resolution), `RESEACT_NLON/NLAT/NLEV` and
 `RESEACT_ADJ_SHARDS` (chemistry worker processes, default 8, 0 = single process),
 `RESEACT_ADJ_JAC` (`sym`), `RESEACT_ADJ_STAGES` (`fwd,adj[,ref,fdtape]`),
 `RESEACT_ADJ_OBJ` (objective, default `SuperFast.O3:surf`), `RESEACT_LABEL`,
-`RESEACT_ADJ_CSV` (gradient output), `RESEACT_FORCING_TIME` (`stage`, the default, or
-`midstep`: the chemistry's time-dependent inputs at the macro-step midpoint, as
-GEOS-Chem does; all three runners take it, see `HELPERS.md`). The runner prints a **provenance block** at
+`RESEACT_ADJ_CSV` (gradient output), `RESEACT_FORCING_TIME` (`midstep`, the default:
+the chemistry's time-dependent inputs at the macro-step midpoint, as GEOS-Chem over
+its chemistry step; or `stage`, at every stage time, the exact reference; all three
+runners take it, see `HELPERS.md`). The runner prints a **provenance block** at
 start — the git HEAD and dirty state of this repo and of every developed sibling — so
 a logged result can be tied to commits.
 
 The forward-only runners: `julia --project=run-model-jl -t 8 run_reseact.jl` (native) and
 `run_reseact_reactant.jl` (compiled); see `HELPERS.md` for their cost and agreement.
+
+Smoke check (native, 7×7×8 window, 2016-01-01 18:00Z + 10 min, i.e.
+`RESEACT_NLON=7 RESEACT_NLAT=7 RESEACT_NLEV=8 RESEACT_T0=64800 RESEACT_SOLVE_SECS=600`):
+the last digest row, t = 18.17 h (O3_min O3_mean O3_max OH_max NO2_mean | rms_int), then
+the `RESULT` line's step counts, should read
+
+```text
+midstep (default): 39.72163 39.96087 39.99911 2.537e-04 8.023e-03 | 1.91e-03, nT=3 nC=78 nbisect=0
+stage:             39.72160 39.96088 39.99911 2.543e-04 8.023e-03 | 1.91e-03, nT=3 nC=102 nbisect=0
+```
 
 ## What to expect (CONUS 13×7×72, 40-core node, 2026-09-05)
 

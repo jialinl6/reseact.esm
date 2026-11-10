@@ -155,9 +155,11 @@
 #   RESEACT_ADJ_REFPARAM  parameters for the forward-mode reference
 #                         (default NEIRegrid.scale,Transport3D.tau_pblmix,NEIRegrid.g0)
 #   RESEACT_ADJ_CSV       write the full 49-component gradient here
-#   RESEACT_FORCING_TIME  stage (default) | midstep -- the chemistry's inputs at each
-#                         stage time, or at the macro-step midpoint (D-GC; see
-#                         `chem_theta`). Not with RESEACT_SUBCYCLE / RESEACT_BUCKET.
+#   RESEACT_FORCING_TIME  midstep (default) | stage -- the chemistry's inputs at the
+#                         macro-step midpoint, as GEOS-Chem over its chemistry step, or
+#                         at each stage time, the exact reference (see `chem_theta`).
+#                         RESEACT_SUBCYCLE / RESEACT_BUCKET run stage when it is unset
+#                         and refuse an explicit midstep.
 # ===========================================================================
 import Pkg
 const REPO = normpath(joinpath(@__DIR__, ".."))
@@ -303,22 +305,29 @@ if DEVLOOP != "0"
               "one traced loop, and the shards hold theirs in other processes.")
 end
 # WHEN THE CHEMISTRY SEES ITS TIME-DEPENDENT INPUTS (run_reseact.jl has the full
-# note). `stage`, the default, is every line below exactly as it was. `midstep`
-# (D-GC) evaluates the time-blended GEOS-FP fields, the sun angle and photolysis,
-# the emissions and the rate constants they feed at the MIDPOINT of each macro
-# step for every chemistry RHS and Jacobian call in it, as GEOS-Chem does over its
-# chemistry timestep. Transport is unchanged. The midpoint rides in the chemistry
-# theta as `tf` (see `chem_theta`), is checkpointed with the macro step, and is
-# restored for every replay and VJP of it, so the backward sweep differentiates
-# exactly the map the forward pass ran.
-const FORCING_TIME = get(ENV, "RESEACT_FORCING_TIME", "stage")
-FORCING_TIME in ("stage", "midstep") ||
-    error("RESEACT_FORCING_TIME must be stage or midstep, got $FORCING_TIME")
-const FORCING_MID = FORCING_TIME == "midstep"
-FORCING_MID && (SUBCYCLE || BUCKETK > 0) &&
+# note). `midstep`, the default, evaluates the time-blended GEOS-FP fields, the sun
+# angle and photolysis, the emissions and the rate constants they feed at the
+# MIDPOINT of each macro step for every chemistry RHS and Jacobian call in it, as
+# GEOS-Chem does over its chemistry timestep. `stage`, the exact reference, reads
+# them at each stage time and is every line below exactly as it was before midstep
+# existed. Transport is unchanged. The midpoint rides in the chemistry theta as `tf`
+# (see `chem_theta`), is checkpointed with the macro step, and is restored for every
+# replay and VJP of it, so the backward sweep differentiates exactly the map the
+# forward pass ran.
+#
+# RESEACT_SUBCYCLE / RESEACT_BUCKET are not wired for midstep: their capacity rungs
+# build their own chemistry programs, which still read the stage time. With the
+# switch unset they run stage and say so; an explicit midstep is refused.
+const FORCING_ASKED = get(ENV, "RESEACT_FORCING_TIME", "midstep")
+FORCING_ASKED in ("stage", "midstep") ||
+    error("RESEACT_FORCING_TIME must be stage or midstep, got $FORCING_ASKED")
+const FORCING_FALLBACK = FORCING_ASKED == "midstep" && (SUBCYCLE || BUCKETK > 0)
+FORCING_FALLBACK && haskey(ENV, "RESEACT_FORCING_TIME") &&
     error("RESEACT_FORCING_TIME=midstep is not wired into RESEACT_SUBCYCLE / RESEACT_BUCKET: " *
           "their capacity rungs build their own chemistry programs, which would still read " *
           "the stage time -- run them with RESEACT_FORCING_TIME=stage.")
+const FORCING_TIME = FORCING_FALLBACK ? "stage" : FORCING_ASKED
+const FORCING_MID = FORCING_TIME == "midstep"
 _env(k, d) = parse(Int, get(ENV, "RESEACT_$k", string(d)))
 _envi(k)   = haskey(ENV, "RESEACT_$k") ? parse(Int, ENV["RESEACT_$k"]) : nothing
 # RESEACT_RES picks the GEOS-FP grid row (GEOSFP_GRIDS in split_common.jl:
@@ -342,8 +351,15 @@ say("=== $LABEL : TIME-LOOP ADJOINT ($(basename(MODEL))) " *
     "nmacro=$NMACRO macro_dt=$(round(Int,MACRO_DT)) ujitter=$UJIT ===")
 say("    stages: " * join(sort(collect(STAGES)), ", "))
 say("    chemistry time-dependent inputs at: " *
-    (FORCING_MID ? "the macro-step midpoint (RESEACT_FORCING_TIME=midstep, D-GC)" :
-                   "each stage time (RESEACT_FORCING_TIME=stage)"))
+    (FORCING_MID ?
+        "the macro-step midpoint, as GEOS-Chem over its chemistry step (RESEACT_FORCING_TIME=midstep)" :
+        "each stage time, the exact reference (RESEACT_FORCING_TIME=stage)"))
+FORCING_FALLBACK &&
+    say("    NOTE $(SUBCYCLE ? "RESEACT_SUBCYCLE=1" : "RESEACT_BUCKET=$BUCKETK") is not wired " *
+        "for midstep, so with RESEACT_FORCING_TIME unset this run uses stage")
+FORCING_MID && MACRO_DT > 600 &&
+    say("    !! RESEACT_MACRO_DT=$(round(Int, MACRO_DT)) s under midstep: the chemistry's " *
+        "time-dependent inputs are held fixed over each whole macro step (GEOS-Chem-like at 300 s)")
 
 # --------------------------------------------------------------------------- #
 # 1. Build -- identical to run_reseact_reactant.jl / sensitivity_forward.jl.

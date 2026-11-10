@@ -91,8 +91,9 @@
 #                                runner defaulted to before 2026-08-21; ad is
 #                                exact coloured forward-mode JVPs. See 1b.
 #   RESEACT_RXFIX                XLA:CPU race workaround (1 = default, on)
-#   RESEACT_FORCING_TIME         stage (default) | midstep -- chemistry inputs at each
-#                                stage time, or at the macro-step midpoint (D-GC; see
+#   RESEACT_FORCING_TIME         midstep (default) | stage -- chemistry inputs at the
+#                                macro-step midpoint, as GEOS-Chem over its chemistry
+#                                step, or at each stage time, the exact reference (see
 #                                run_reseact.jl). A macro step here is one stop-grid
 #                                interval, so the midpoint is that interval's.
 #
@@ -335,20 +336,25 @@ if SYMJAC
         w <= 1e-12 || error("RXJAC=sym: the gather plan does not reproduce the Jacobian")
     end
 end
-# RESEACT_FORCING_TIME=midstep (D-GC) evaluates the chemistry's time-dependent inputs
-# at the macro step's midpoint for every RHS and Jacobian call in it, instead of at
-# each stage time; see run_reseact.jl where `fc` is built. Transport is unchanged.
+# RESEACT_FORCING_TIME=midstep (the default) evaluates the chemistry's time-dependent
+# inputs at the macro step's midpoint for every RHS and Jacobian call in it, as
+# GEOS-Chem does over its chemistry step; `stage`, the exact reference, evaluates them
+# at each stage time. See run_reseact.jl where `fc` is built. Transport is unchanged.
 # THE MIDPOINT TRAVELS IN `aux`, the loop-carried operand of the chemistry
 # `stablehlo.while`. Captured by the closures instead, it fails MLIR verification
 # ("expect operands to be compatible with body block arguments"): a traced value
 # captured by a traced while body is not one of its block arguments.
-const FORCING_TIME = get(ENV, "RESEACT_FORCING_TIME", "stage")
+const FORCING_TIME = get(ENV, "RESEACT_FORCING_TIME", "midstep")
 FORCING_TIME in ("stage", "midstep") ||
     error("RESEACT_FORCING_TIME must be stage or midstep, got $FORCING_TIME")
 const FORCING_MID = FORCING_TIME == "midstep"
 say("  chemistry time-dependent inputs at: " *
-    (FORCING_MID ? "the macro-step midpoint (RESEACT_FORCING_TIME=midstep, D-GC)" :
-                   "each stage time (RESEACT_FORCING_TIME=stage)"))
+    (FORCING_MID ?
+        "the macro-step midpoint, as GEOS-Chem over its chemistry step (RESEACT_FORCING_TIME=midstep)" :
+        "each stage time, the exact reference (RESEACT_FORCING_TIME=stage)"))
+FORCING_MID && MACRO_DT > 600 &&
+    say("  !! RESEACT_MACRO_DT=$(round(Int, MACRO_DT)) s under midstep: the chemistry's " *
+        "time-dependent inputs are held fixed over each whole macro step (GEOS-Chem-like at 300 s)")
 adv = let gT = g4[1], gC = g4[2], NS = NS, NC = NC, masks = masks,
          PLAN = PLAN, gjbJ = gjbJ, SYMJAC = SYMJAC, FORCING_MID = FORCING_MID
     (uR, pR, t0R, t1R, dtTR, dtCR, bufsT, bufsC, bufsJ) -> begin

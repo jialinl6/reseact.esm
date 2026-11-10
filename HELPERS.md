@@ -113,19 +113,40 @@ the run. This needs the EarthSciIO fix that locates a record inside *its own*
 file (`_file_record`): the cadence tick is global, the file is local, and tick 9
 of a 3-hourly cadence used to ask an 8-record file for record 9.
 
-**Chemistry forcing time — `RESEACT_FORCING_TIME=stage|midstep`.** `stage` (the
-default, unchanged behaviour) evaluates the chemistry's time-dependent inputs —
-the time-blended GEOS-FP fields, the sun angle and Fast-JX photolysis, the
-emissions and the rate constants they feed — at every RHS/Jacobian call's own
-stage time. `midstep` (D-GC) evaluates them once per macro step, at its midpoint,
-for every chemistry call in it, which is what GEOS-Chem does over its chemistry
-timestep (fullchem: `Update_RCONST` once per box before KPP's `Integrate`,
-`ICNTRL(15) = -1`, photolysis at `SUNCOS_MID`). Transport is unchanged. Any other
-value is an error, and every runner prints which mode it runs. Measured at CONUS
-13×7×30, 1 day, 8 threads (native): time loop 232.0 → 125.9 s, chemistry steps
-9,092 → 5,140; surface O3 mean −8e-5 ppb (max 0.017 ppb), NO2 RMS relative 0.17 %.
-The compiled runner's `midstep` matches the native one's to 2e-10 on O3 and 7e-7
-on NO2. How each runner carries the midpoint:
+**Chemistry forcing time — `RESEACT_FORCING_TIME=midstep|stage`.** `midstep` (the
+default since 2026-11-09) evaluates the chemistry's time-dependent inputs — the
+time-blended GEOS-FP fields, the sun angle and Fast-JX photolysis, the emissions
+and the rate constants they feed — once per macro step, at its midpoint, for every
+chemistry RHS and Jacobian call in it, which is what GEOS-Chem does over its
+chemistry timestep (fullchem: `Update_RCONST` once per box before KPP's
+`Integrate`, `ICNTRL(15) = -1`, photolysis at `SUNCOS_MID`). `stage` evaluates them
+at every call's own stage time: the exact reference, and the behaviour before
+midstep existed. Transport is unchanged. Any other value is an error, and every
+runner prints which mode it runs. Under `midstep` a `RESEACT_MACRO_DT` above 600 s
+draws a warning, since the inputs are then held fixed for that whole interval
+(GEOS-Chem-like at 300 s).
+
+Measured at CONUS 13×7×30, 1 day, 8 threads (native): time loop 232.0 → 125.9 s,
+chemistry steps 9,092 → 5,140; surface O3 mean −8e-5 ppb (max 0.017 ppb), NO2 RMS
+relative 0.17 %. Over 5 days of CONUS (2016-01-17 + 120 h) the loop is −48 % on
+every day and chemistry steps −39 %, and the difference from `stage` stays small
+and does not accumulate: surface O3 mean −8e-5 ppb on day 1 to −4.2e-4 ppb on
+day 5, NO2 RMS 0.17 % flat, NO and OH ~2–3 %. Verified on the cluster in all
+three runners: the compiled runner's `midstep` matches the native one's to 2e-10
+on O3 and 7e-7 on NO2; in the adjoint the replay is exact, the structural identity
+and `fdtape` pass, and the CONUS 24 h J matches the native runner's to −3.5e-6.
+
+Smoke check (native, 7×7×8 window, 2016-01-01 18:00Z + 10 min, i.e.
+`RESEACT_NLON=7 RESEACT_NLAT=7 RESEACT_NLEV=8 RESEACT_T0=64800
+RESEACT_SOLVE_SECS=600`): the last digest row, t = 18.17 h (O3_min O3_mean O3_max
+OH_max NO2_mean | rms_int), then the `RESULT` line's step counts, should read
+
+```text
+midstep (default): 39.72163 39.96087 39.99911 2.537e-04 8.023e-03 | 1.91e-03, nT=3 nC=78 nbisect=0
+stage:             39.72160 39.96088 39.99911 2.543e-04 8.023e-03 | 1.91e-03, nT=3 nC=102 nbisect=0
+```
+
+How each runner carries the midpoint:
 
 * `run_reseact.jl` — a `TFORCE` Ref set once per macro step and read by the
   chemistry RHS and Jacobian. A bisected step keeps the whole step's midpoint. It
@@ -135,9 +156,10 @@ on NO2. How each runner carries the midpoint:
 * `tools/adjoint_gradient.jl` — `tf` in the chemistry theta (`chem_theta`),
   checkpointed per macro step (`Ckpt.tf`) and restored for every replay, VJP, JVP
   and fd replay of that step, and sent with every chemistry shard call. It is a
-  Const for Enzyme. Not with `RESEACT_SUBCYCLE`/`RESEACT_BUCKET`, and
-  `tools/sensitivity_forward.jl` (the forward arm of `run_reseact_adjoint.jl`)
-  refuses `midstep`.
+  Const for Enzyme. `RESEACT_SUBCYCLE`/`RESEACT_BUCKET` (forward-only experiments)
+  are not wired for it: with `RESEACT_FORCING_TIME` unset they run `stage` and
+  print a note, and an explicit `midstep` is refused. `tools/sensitivity_forward.jl`
+  (the forward arm of `run_reseact_adjoint.jl`) does the same.
 
 ### `run_reseact.jl` (native in-place) — the above **plus** `op_split.jl`.
 

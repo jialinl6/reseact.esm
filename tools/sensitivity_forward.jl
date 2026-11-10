@@ -142,9 +142,12 @@ const OBJSPEC   = get(ENV, "RESEACT_SENS_OBJ", "SuperFast.O3:surf")
 const SKIPFD    = get(ENV, "RESEACT_SENS_SKIPFD", "0") == "1"
 const SENSCSV   = get(ENV, "RESEACT_SENS_CSV", "")
 # This arm's traced macro step reads the chemistry's inputs at each stage time and
-# is not wired for RESEACT_FORCING_TIME=midstep (D-GC; run_reseact_reactant.jl
-# shows how). Refuse it, rather than differentiate a different map from the one the
-# adjoint arm or the runners integrate under the same environment.
+# is not wired for RESEACT_FORCING_TIME=midstep (the runners' default: the inputs at
+# the macro-step midpoint; run_reseact_reactant.jl shows how). With the switch unset
+# it runs stage and says so; an explicit midstep is refused, rather than
+# differentiate a different map from the one the adjoint arm or the runners
+# integrate under the same environment.
+const FORCING_UNSET = !haskey(ENV, "RESEACT_FORCING_TIME")
 let ft = get(ENV, "RESEACT_FORCING_TIME", "stage")
     ft in ("stage", "midstep") ||
         error("RESEACT_FORCING_TIME must be stage or midstep, got $ft")
@@ -176,6 +179,9 @@ say("=== $LABEL : FORWARD parameter sensitivity ($(basename(MODEL))) " *
     "grid=$(GRID_MP["NLON"])x$(GRID_MP["NLAT"])x$NLEV_EFF T0=$(round(Int,T0)) " *
     "nmacro=$NMACRO macro_dt=$(round(Int,MACRO_DT)) ===")
 say("    d[$OBJSPEC]/d[$(join(PARAMS, ", "))] at t=$(round(Int,T_END)) s")
+FORCING_UNSET &&
+    say("    NOTE this arm is not wired for midstep, so with RESEACT_FORCING_TIME unset it " *
+        "uses stage (set it to stage everywhere to compare with the adjoint arm)")
 
 # --------------------------------------------------------------------------- #
 # 1. Build -- identical to run_reseact_reactant.jl.

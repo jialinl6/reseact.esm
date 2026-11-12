@@ -3,7 +3,7 @@
 # EarthSciASTDiff's evaluation document.
 # ===========================================================================
 #
-#   band_program(part; source_layout, build_kwargs)  ->  BandProgram
+#   band_program(part; source_layout, build_kwargs, form)  ->  BandProgram
 #
 # EarthSciASTDiff 0.3 evaluates nothing: b4c9c1b ("evaluate nothing") removed
 # `prepare_jacobian` / `JacobianEvaluator`, and every value now comes from
@@ -74,7 +74,8 @@ const ED = EarthSciASTDiff
 export BandProgram, band_program
 
 struct BandProgram
-    fJ                                  # the :oop band build; compile with rx_rhs
+    fJ                                  # the band build: :oop (compile with rx_rhs), or the
+                                        # :inplace f!(du, u, p, t) when form = :inplace
     pJ                                  # the band build's own parameters
     var_map::Dict{String,Int}           # band-model name -> slot in uj / duj
     dmJ                                 # its DiscreteMaterializer, or nothing
@@ -100,8 +101,8 @@ _sysview(input, model_name) =
     model_name === nothing ? ED.sysview(input) : ED.sysview(input, String(model_name))
 
 """
-    band_program(input; source_layout, model_name = nothing, build_kwargs = NamedTuple())
-        -> BandProgram
+    band_program(input; source_layout, model_name = nothing, build_kwargs = NamedTuple(),
+                 form = :oop) -> BandProgram
 
 Build the band program of `input`'s state Jacobian (a `FlattenedSystem`, or an
 `EsmFile` with `model_name`) and the index tables that place its output.
@@ -110,11 +111,14 @@ Build the band program of `input`'s state Jacobian (a `FlattenedSystem`, or an
 the consumer's OWN `build_evaluator` of `input`, with the SAME `build_kwargs`.
 Its `var_map` fixes `rownames` and the matrix layout, so the plan built from the
 result indexes the program the consumer compiles. `build_kwargs` goes to the
-band build with `form = :oop` imposed (traceable output only); put the
-`materialize_out` the RHS uses in it.
+band build with `form` imposed; put the `materialize_out` the RHS uses in it.
+`form = :oop` (the default) is the traceable output the Reactant callers compile;
+`form = :inplace` makes `fJ` an ordinary `f!(du, u, p, t)` for the native runner.
+Everything after the build -- `umap`, the pattern, the scatter -- is the same for
+both.
 """
 function band_program(input; source_layout, model_name = nothing,
-                      build_kwargs = NamedTuple())
+                      build_kwargs = NamedTuple(), form::Symbol = :oop)
     t0 = time()
     doc, fields0 = ED.evaluation_document(input; wrt = :states, model_name = model_name)
     fields = String.(fields0)
@@ -123,7 +127,7 @@ function band_program(input; source_layout, model_name = nothing,
     t1 = time()
     tree = length(doc["models"]) > 1
     src = EA.load_string(ED.stable_json(doc))
-    kw = merge(build_kwargs, (; form = :oop))
+    kw = merge(build_kwargs, (; form = form))
     fJ, u0J, pJ, _, vmJ0 = tree ?
         EA.build_evaluator(EA.flatten(src); kw...) :
         EA.build_evaluator(src; model_name = "JacobianEval", kw...)

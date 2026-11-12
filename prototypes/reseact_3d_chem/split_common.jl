@@ -150,10 +150,14 @@ end
 # 1. Split the reseact document into [transport, chemistry] run docs.
 #    Replicates EarthSciAST._prepare_run_doc(preserve_refs=true) up to the
 #    transformed FlattenedSystem, then splits and re-emits each part.
+#    `return_parts = true` returns `(docs, parts)`: `parts` is split_system's
+#    FlattenedSystem output, which the band program (tools/rx_band_program.jl)
+#    is built from -- it needs the part, not its re-emitted document.
 # --------------------------------------------------------------------------- #
 function prepare_split_docs(model_path; rule = nothing, nparts = 2,
                             preserve_refs::Bool = true,
-                            metaparameters::AbstractDict = Dict{String,Int}())
+                            metaparameters::AbstractDict = Dict{String,Int}(),
+                            return_parts::Bool = false)
     file = isempty(metaparameters) ? EA.load_path(model_path) :
            EA.load_path(model_path; metaparameters = metaparameters)
     flat = EA.flatten(file)                                # carries refs by default now (tier at build)
@@ -163,7 +167,8 @@ function prepare_split_docs(model_path; rule = nothing, nparts = 2,
     promoted = EA.promoted_array_names(pre, flat)         # scalar chains lifted to the grid
     r = rule === nothing ? stencil_following_rule(flat) : rule
     parts = split_system(flat, r; nparts = nparts)        # [transport, chemistry]
-    return [index_promoted_refs_by_loop!(EA.flattened_to_esm(p), promoted) for p in parts]
+    docs = [index_promoted_refs_by_loop!(EA.flattened_to_esm(p), promoted) for p in parts]
+    return return_parts ? (docs, parts) : docs
 end
 
 # --------------------------------------------------------------------------- #
@@ -743,6 +748,10 @@ function build_split_run(docs, tspan; providers = nothing,
             buffers = EA.RefreshBuffers(merged_param), post_refresh = post)
     end
 
+    # `build_kwargs` is what every part's build_evaluator got, so a further build
+    # over the same split (the band program) binds the same overrides and buffers.
     return (; funcs = Tuple(funcs), u0, p, tspan = (t0, Float64(tspan[2])),
-            var_map, cb, tstops, merged_param, dms, slice)
+            var_map, cb, tstops, merged_param, dms, slice,
+            build_kwargs = (; parameter_overrides = overrides, const_arrays = merged_const,
+                              param_arrays = merged_param))
 end

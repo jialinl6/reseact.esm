@@ -72,7 +72,10 @@
 #   RESEACT_SOLVE_SECS window length, s               (default 604800 = 7 days)
 #   RESEACT_MACRO_DT   Lie-Trotter interval, s        (default 300)
 #   RESEACT_MIN_MACRO_DT  bisection floor, s          (default 9 = five halvings)
-#   RESEACT_JAC        "ad" (default) or "fd"         chemistry block Jacobian
+#   RESEACT_JAC        "ad" (default), "fd" or "sym"  chemistry block Jacobian: ForwardDiff,
+#                      finite difference, or EarthSciASTDiff's symbolic band program
+#   RESEACT_JAC_CHECK  1: check the sym Jacobian against ForwardDiff's at T0 and stop
+#                      on a mismatch (default 0; compiles the ForwardDiff Jacobian)
 #   RESEACT_FORCING_TIME  "midstep" (default) or "stage": when the chemistry
 #                      evaluates its time-dependent inputs -- once at the macro step's
 #                      midpoint, as GEOS-Chem over its chemistry step, or at each stage
@@ -89,7 +92,8 @@
 #                                                  reseact_forcing, native_slice,
 #                                                  validate_reseact, hydrostatic_dp
 #   prototypes/reseact_3d_chem/blockdiag_local.jl  BlockDiagonal (from EarthSciMLBase)
-#   prototypes/reseact_3d_chem/block_jac.jl        cellmajor_perm/rhs, block_{fd,ad}_jac
+#   prototypes/reseact_3d_chem/block_jac.jl        cellmajor_perm/rhs, block_{fd,ad,sym}_jac
+#   tools/rx_band_program.jl                       band_program (RESEACT_JAC=sym only)
 #   tools/reactant_handoff/op_split.jl             lie_trotter_solve{,_bisect}
 #   tools/grid_resize.jl                           slice_hybrid_coefs (NLEV < 72)
 # ===========================================================================
@@ -150,6 +154,19 @@ const STATEDUMP  = get(ENV, "RESEACT_STATEDUMP", "")   # raw state written iff t
 # Floor on the bisection retry: five halvings from 300 s. A run needing chemistry
 # steps shorter than this has a different problem, and should fail loudly.
 const MIN_MACRO_DT = parse(Float64, get(ENV, "RESEACT_MIN_MACRO_DT", "9.0"))
+# The chemistry block Jacobian, checked here so a bad value fails before the build.
+# AD is the default: the species here span thirty orders (NO titrates to ~1e-26
+# through the night, OH lives at 1e-13) and no finite difference step is
+# defensible across that range -- see block_jac.jl. RESEACT_JAC=fd forces the old
+# finite-difference block Jacobian for an A/B. RESEACT_JAC=sym evaluates
+# EarthSciASTDiff's symbolic Jacobian of the chemistry part (`block_sym_jac`). A
+# cluster probe of the same band program (CONUS, 1 day) agreed with ForwardDiff on
+# every entry with bit-identical trajectories; time loop 4x5 32 threads 81.1 ->
+# 55.9 s, 4x5 8 threads -13 %, 2x2.5 8 threads -25 %; first macro step ~66 -> ~25 s
+# (no Dual compile).
+const JACMODE = get(ENV, "RESEACT_JAC", "ad")
+JACMODE in ("ad", "fd", "sym") || error("RESEACT_JAC must be ad, fd or sym, got $JACMODE")
+const JAC_CHECK = get(ENV, "RESEACT_JAC_CHECK", "0") == "1"
 _env(k, d) = parse(Int, get(ENV, "RESEACT_$k", string(d)))
 _envi(k)   = haskey(ENV, "RESEACT_$k") ? parse(Int, ENV["RESEACT_$k"]) : nothing
 # One origin -> metaparameters + the degree-space parameters + the index base
@@ -217,7 +234,7 @@ let nt = Threads.nthreads(),
             "(see HELPERS.md). A week run takes roughly 10x longer without it.")
 end
 validate_reseact(MODEL; metaparameters = GRID_MP, say = say)
-docs = prepare_split_docs(MODEL; metaparameters = GRID_MP)
+docs, parts = prepare_split_docs(MODEL; metaparameters = GRID_MP, return_parts = true)
 ff = reseact_forcing(CHEMDIR; ndays = NDAYS, res = SLICE.res)
 # When NLEV<72 the `lev` axis is shorter than the 72-entry hybrid table; slice the
 # vertical coefs to match (a truncated column, k=1 = surface).
@@ -240,6 +257,23 @@ run = build_split_run(docs, (T0, T_END);
     parameters = ff.parameters, slice = SLICE)
 say(@sprintf("BUILD %.2f s  nstates=%d", time() - tb, length(run.u0)))
 
+# RESEACT_JAC=sym: the band program of the chemistry part, built :inplace from the
+# SAME split part, overrides and live buffers as part 2's RHS (run.build_kwargs),
+# with its own DiscreteMaterializer. It joins run.dms, so the forcing refresh
+# re-materializes it with both RHS halves.
+JACMODE == "sym" && include(joinpath(REPO, "tools", "rx_band_program.jl"))
+BAND = nothing
+if JACMODE == "sym"
+    tj = time()
+    BAND = band_program(parts[2]; source_layout = (u0 = run.u0, p = run.p, var_map = run.var_map),
+                        build_kwargs = (; run.build_kwargs..., materialize_out = EA.DiscreteMaterializer()),
+                        form = :inplace)
+    push!(run.dms, BAND.dmJ)
+    say(@sprintf("    band program %.1f s (document %.1f, build %.1f, pattern %.1f, scatter %.1f)  %s",
+                 time() - tj, BAND.timings.doc, BAND.timings.build, BAND.timings.pattern,
+                 BAND.timings.scatter, BAND))
+end
+
 # --------------------------------------------------------------------------- #
 # Cell-major reorder + block chemistry Jacobian (the block-diagonal structure is
 # only contiguous once the state is permuted species-major -> cell-major).
@@ -247,20 +281,50 @@ say(@sprintf("BUILD %.2f s  nstates=%d", time() - tb, length(run.u0)))
 P = cellmajor_perm(run.var_map)
 f_trans_cm! = cellmajor_rhs(run.funcs[1], P.sm_of_cm)
 f_chem_cm!  = cellmajor_rhs(run.funcs[2], P.sm_of_cm)
-# AD is the default: the species here span thirty orders (NO titrates to ~1e-26
-# through the night, OH lives at 1e-13) and no finite difference step is
-# defensible across that range -- see block_jac.jl. RESEACT_JAC=fd forces the old
-# finite-difference block Jacobian for an A/B.
-const JACMODE = get(ENV, "RESEACT_JAC", "ad")
 # The chemistry W's block LU and solve run on Polyester's worker pool (MapPolyester), the pool EarthSciAST's kernels
 # use: handed to ordinary Julia tasks between those kernels they wait on its spinning workers and run nearly serially.
 # Bit-identical digest, 20% off the CONUS time loop on top of the generic LU. Needs an EarthSciMLBase checkout with
 # MapPolyester (src/map_algorithm.jl + ext/polyester_map.jl; see README).
-jac_cm!, mkjp = JACMODE == "fd" ? block_fd_jac(f_chem_cm!, P.NS, P.NC; alg = MapPolyester()) :
-                                  block_ad_jac(run.funcs[2], P.sm_of_cm, P.NS, P.NC; alg = MapPolyester())
-say("    chem Jacobian: $(JACMODE == "fd" ? "finite difference" : "ForwardDiff (exact)"); block LU/solve on MapPolyester")
+jac_cm!, mkjp = JACMODE == "fd"  ? block_fd_jac(f_chem_cm!, P.NS, P.NC; alg = MapPolyester()) :
+                JACMODE == "sym" ? block_sym_jac(BAND, P.sm_of_cm, P.NS, P.NC; alg = MapPolyester()) :
+                                   block_ad_jac(run.funcs[2], P.sm_of_cm, P.NS, P.NC; alg = MapPolyester())
+say("    chem Jacobian: " * (JACMODE == "fd"  ? "finite difference" :
+                             JACMODE == "sym" ? "symbolic (EarthSciASTDiff band program, exact)" :
+                                                "ForwardDiff (exact)") * "; block LU/solve on MapPolyester")
 u = run.u0[P.sm_of_cm]
 foreach(d -> d.materialize!(), run.dms)
+# RESEACT_JAC_CHECK=1: the symbolic Jacobian against ForwardDiff's, at T0 on the
+# initial state. Each entry's difference is taken relative to the largest entry of
+# its cell's ForwardDiff block. Off by default: it compiles the ForwardDiff
+# Jacobian (~40 s at CONUS).
+"Worst |a - b| / (largest |b| in b's cell block) over NS x NS x NC block data, and its (row, col, cell)."
+function block_rel_diff(a::AbstractArray{<:Real,3}, b::AbstractArray{<:Real,3})
+    worst = 0.0; at = (0, 0, 0)
+    for c in axes(b, 3)
+        sc = maximum(abs, view(b, :, :, c))
+        for s in axes(b, 2), r in axes(b, 1)
+            d = abs(a[r, s, c] - b[r, s, c])
+            e = d == 0 ? 0.0 : (isfinite(d) && sc > 0 ? d / sc : Inf)
+            e > worst && (worst = e; at = (r, s, c))
+        end
+    end
+    return worst, at
+end
+JAC_CHECK && JACMODE != "sym" && say("    RESEACT_JAC_CHECK applies to RESEACT_JAC=sym only; ignored")
+if JAC_CHECK && JACMODE == "sym"
+    let tc = time(), uc = run.u0[P.sm_of_cm], Js = mkjp()
+        jad!, mkad = block_ad_jac(run.funcs[2], P.sm_of_cm, P.NS, P.NC; alg = MapPolyester())
+        Ja = mkad()
+        jac_cm!(Js, uc, run.p, T0)
+        jad!(Ja, uc, run.p, T0)
+        worst, at = block_rel_diff(Js.data, Ja.data)
+        loc = worst == 0 ? "" : " at d $(P.bases[at[1]]) / d $(P.bases[at[2]]), cell $(P.cells[at[3]])"
+        say(@sprintf("    RESEACT_JAC_CHECK: sym vs ForwardDiff at T0: worst |difference| / block max %.3e%s; nonzeros %d vs %d  %s  (%.1f s)",
+                     worst, loc, count(!iszero, Js.data), count(!iszero, Ja.data),
+                     worst <= 1e-10 ? "PASS" : "FAIL", time() - tc))
+        worst <= 1e-10 || error("RESEACT_JAC_CHECK: the symbolic chemistry Jacobian differs from ForwardDiff's by $worst$loc")
+    end
+end
 # m(0) from the REAL GEOS-FP PS, not a constant -- see hydrostatic_dp.
 let dp0 = hydrostatic_dp(run.merged_param, ff.const_arrays, T0; slice = run.slice),
     mb = P.base_pos["Transport3D.m"]

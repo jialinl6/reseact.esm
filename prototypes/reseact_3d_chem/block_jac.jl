@@ -134,3 +134,58 @@ function block_ad_jac(f_sm!, sm_of_cm, NS, NC; alg = MapBroadcast())
     mkjp() = BlockDiagonal(zeros(NS, NS, NC), alg)   # alg: what its LU and solve map over the cells with
     return jac_cm!, mkjp
 end
+
+# EXACT block-diagonal Jacobian from EarthSciASTDiff's evaluation document. Same
+# contract as `block_ad_jac`, so it is a drop-in replacement.
+#
+# `band` is a `band_program(...; form = :inplace)` (tools/rx_band_program.jl) of
+# the chemistry split part: ONE in-place RHS call of its band model at (u, t)
+# leaves every Jacobian band value in `duj`, and `band.scatter` places each one in
+# `band.prototype`, over the runner's species-major layout. A cluster probe of the
+# same computation on the CONUS grid agreed with `block_ad_jac` on every entry, and
+# it costs no ForwardDiff Dual compile.
+#
+# The scatter is resolved to cell-major block positions once, here: each band
+# entry (slot, nzval position) becomes (slot, linear index into the NS x NS x NC
+# block data). An entry coupling two cells would mean the chemistry is not
+# block-diagonal, and is an error. `p` is unused at call time: the band build
+# reads its own `band.pJ`, bound to the same live forcing buffers as the RHS. Its
+# DiscreteMaterializer (`band.dmJ`) has to be re-materialized at every forcing
+# refresh, with the RHS halves'.
+function block_sym_jac(band, sm_of_cm, NS, NC; alg = MapBroadcast())
+    N = NS * NC
+    N == length(sm_of_cm) || error("block_sym_jac: NS*NC=$N != length(sm_of_cm)=$(length(sm_of_cm))")
+    length(band.umap) == N || error("block_sym_jac: the band program lifts $(length(band.umap)) states, the runner has $N")
+    proto = band.prototype
+    size(proto) == (N, N) || error("block_sym_jac: band prototype is $(size(proto)), expected ($N, $N)")
+    cm_of_sm = invperm(sm_of_cm)
+    colof = Vector{Int}(undef, length(proto.nzval))
+    for c in 1:N, q in proto.colptr[c]:(proto.colptr[c+1] - 1)
+        colof[q] = c
+    end
+    slot = Vector{Int}(undef, length(band.scatter)); lin = Vector{Int}(undef, length(band.scatter))
+    for (k, (s, pos)) in enumerate(band.scatter)
+        rs, cs = proto.rowval[pos], colof[pos]
+        cr, ir = divrem(cm_of_sm[rs] - 1, NS)
+        cc, ic = divrem(cm_of_sm[cs] - 1, NS)
+        cr == cc || error("block_sym_jac: band entry ($(band.rownames[rs]), $(band.rownames[cs])) " *
+                          "couples cell $(cr + 1) to cell $(cc + 1); the chemistry Jacobian is not block-diagonal")
+        slot[k] = s
+        lin[k] = 1 + ir + ic * NS + cr * NS * NS
+    end
+    # u_cm -> species-major -> band-model slot, fused into one gather. uj's other
+    # slots (the band fields' own states) stay at the zeros the band program left.
+    jmap = band.umap[sm_of_cm]
+    fJ, pJ = band.fJ, band.pJ
+    uj = copy(band.uj); duj = similar(uj)
+    function jac_cm!(J, u_cm, p, t)
+        @inbounds for i in 1:N; uj[jmap[i]] = u_cm[i]; end
+        fJ(duj, uj, pJ, t)
+        data = J.data
+        fill!(data, 0)
+        @inbounds for k in eachindex(slot); data[lin[k]] += duj[slot[k]]; end
+        return nothing
+    end
+    mkjp() = BlockDiagonal(zeros(NS, NS, NC), alg)   # alg: what its LU and solve map over the cells with
+    return jac_cm!, mkjp
+end

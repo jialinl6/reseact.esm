@@ -72,8 +72,8 @@
 #   RESEACT_SOLVE_SECS window length, s               (default 604800 = 7 days)
 #   RESEACT_MACRO_DT   Lie-Trotter interval, s        (default 300)
 #   RESEACT_MIN_MACRO_DT  bisection floor, s          (default 9 = five halvings)
-#   RESEACT_JAC        "ad" (default), "fd" or "sym"  chemistry block Jacobian: ForwardDiff,
-#                      finite difference, or EarthSciASTDiff's symbolic band program
+#   RESEACT_JAC        "sym" (default), "ad" or "fd"  chemistry block Jacobian: EarthSciASTDiff's
+#                      symbolic band program, ForwardDiff, or finite difference
 #   RESEACT_JAC_CHECK  1: check the sym Jacobian against ForwardDiff's at T0 and stop
 #                      on a mismatch (default 0; compiles the ForwardDiff Jacobian)
 #   RESEACT_FORCING_TIME  "midstep" (default) or "stage": when the chemistry
@@ -93,7 +93,7 @@
 #                                                  validate_reseact, hydrostatic_dp
 #   prototypes/reseact_3d_chem/blockdiag_local.jl  BlockDiagonal (from EarthSciMLBase)
 #   prototypes/reseact_3d_chem/block_jac.jl        cellmajor_perm/rhs, block_{fd,ad,sym}_jac
-#   tools/rx_band_program.jl                       band_program (RESEACT_JAC=sym only)
+#   tools/rx_band_program.jl                       band_program (the default RESEACT_JAC=sym)
 #   tools/reactant_handoff/op_split.jl             lie_trotter_solve{,_bisect}
 #   tools/grid_resize.jl                           slice_hybrid_coefs (NLEV < 72)
 # ===========================================================================
@@ -155,16 +155,22 @@ const STATEDUMP  = get(ENV, "RESEACT_STATEDUMP", "")   # raw state written iff t
 # steps shorter than this has a different problem, and should fail loudly.
 const MIN_MACRO_DT = parse(Float64, get(ENV, "RESEACT_MIN_MACRO_DT", "9.0"))
 # The chemistry block Jacobian, checked here so a bad value fails before the build.
-# AD is the default: the species here span thirty orders (NO titrates to ~1e-26
+# The default is exact: the species here span thirty orders (NO titrates to ~1e-26
 # through the night, OH lives at 1e-13) and no finite difference step is
 # defensible across that range -- see block_jac.jl. RESEACT_JAC=fd forces the old
-# finite-difference block Jacobian for an A/B. RESEACT_JAC=sym evaluates
-# EarthSciASTDiff's symbolic Jacobian of the chemistry part (`block_sym_jac`). A
-# cluster probe of the same band program (CONUS, 1 day) agreed with ForwardDiff on
-# every entry with bit-identical trajectories; time loop 4x5 32 threads 81.1 ->
-# 55.9 s, 4x5 8 threads -13 %, 2x2.5 8 threads -25 %; first macro step ~66 -> ~25 s
-# (no Dual compile).
-const JACMODE = get(ENV, "RESEACT_JAC", "ad")
+# finite-difference block Jacobian for an A/B.
+# "sym" (the default since 2026-11-12, as in the compiled runner and the adjoint
+# driver) evaluates EarthSciASTDiff's symbolic Jacobian of the chemistry part
+# (`block_sym_jac`). "ad", the ForwardDiff Jacobian and the default before it,
+# stays as the A/B. Measured on the cluster, CONUS, 1 day, each sym run against an
+# ad run of the same settings: every digest bit-identical, RESEACT_JAC_CHECK worst
+# difference 0; time loop 4x5 8 threads 110.2 -> 82.9 s, 4x5 32 threads 83.9 ->
+# 56.3 s, 2x2.5 8 threads 437.3 -> 317.2 s, 2x2.5 32 threads 286.8 -> 209.3 s
+# (-25 to -33 %); the first macro step 23-37 s shorter (no Dual compile), against
+# 52-78 s to build the band program. The whole run is about even for 1 day at 4x5
+# on 8 threads, and shorter for longer runs, more threads or finer grids (2x2.5
+# on 8 threads 1,211 -> 1,035 s).
+const JACMODE = get(ENV, "RESEACT_JAC", "sym")
 JACMODE in ("ad", "fd", "sym") || error("RESEACT_JAC must be ad, fd or sym, got $JACMODE")
 const JAC_CHECK = get(ENV, "RESEACT_JAC_CHECK", "0") == "1"
 _env(k, d) = parse(Int, get(ENV, "RESEACT_$k", string(d)))

@@ -80,6 +80,10 @@
 #                      evaluates its time-dependent inputs -- once at the macro step's
 #                      midpoint, as GEOS-Chem over its chemistry step, or at each stage
 #                      time, the exact reference (see where `fc` is built)
+#   RESEACT_CACHE_DIR  setup cache directory          (default: none = off). Keeps the
+#                      prepared model and the band program's static parts between runs,
+#                      keyed on the model, the metaparameters, this repo's HEAD and the
+#                      EarthSciAST/Splitter/Diff sources (see setup_cache.jl)
 #   RESEACT_ZARR       gridded output store           (default: none)
 #   RESEACT_OUT_EVERY  write one record every N macro steps  (default 12 = hourly)
 #   RESEACT_FLUSH_EVERY  commit the sink every N written records (default 12)
@@ -91,6 +95,7 @@
 #   prototypes/reseact_3d_chem/split_common.jl     prepare_split_docs, build_split_run,
 #                                                  reseact_forcing, native_slice,
 #                                                  validate_reseact, hydrostatic_dp
+#   prototypes/reseact_3d_chem/setup_cache.jl      setup_cache (RESEACT_CACHE_DIR)
 #   prototypes/reseact_3d_chem/blockdiag_local.jl  BlockDiagonal (from EarthSciMLBase)
 #   prototypes/reseact_3d_chem/block_jac.jl        cellmajor_perm/rhs, block_{fd,ad,sym}_jac
 #   tools/rx_band_program.jl                       band_program (the default RESEACT_JAC=sym)
@@ -240,7 +245,7 @@ let nt = Threads.nthreads(),
             "(see HELPERS.md). A week run takes roughly 10x longer without it.")
 end
 validate_reseact(MODEL; metaparameters = GRID_MP, say = say)
-docs, parts = prepare_split_docs(MODEL; metaparameters = GRID_MP, return_parts = true)
+docs, parts = prepare_split_docs(MODEL; metaparameters = GRID_MP, return_parts = true, say = say)
 ff = reseact_forcing(CHEMDIR; ndays = NDAYS, res = SLICE.res)
 # When NLEV<72 the `lev` axis is shorter than the 72-entry hybrid table; slice the
 # vertical coefs to match (a truncated column, k=1 = surface).
@@ -266,14 +271,17 @@ say(@sprintf("BUILD %.2f s  nstates=%d", time() - tb, length(run.u0)))
 # RESEACT_JAC=sym: the band program of the chemistry part, built :inplace from the
 # SAME split part, overrides and live buffers as part 2's RHS (run.build_kwargs),
 # with its own DiscreteMaterializer. It joins run.dms, so the forcing refresh
-# re-materializes it with both RHS halves.
+# re-materializes it with both RHS halves. With RESEACT_CACHE_DIR set, its static
+# parts (document, pattern, scatter) come from the setup cache, keyed as the prepared
+# model is; only the build runs.
 JACMODE == "sym" && include(joinpath(REPO, "tools", "rx_band_program.jl"))
 BAND = nothing
 if JACMODE == "sym"
     tj = time()
     BAND = band_program(parts[2]; source_layout = (u0 = run.u0, p = run.p, var_map = run.var_map),
                         build_kwargs = (; run.build_kwargs..., materialize_out = EA.DiscreteMaterializer()),
-                        form = :inplace)
+                        form = :inplace,
+                        cache = setup_cache("band program", MODEL, GRID_MP; extra = (; part = 2), say = say))
     push!(run.dms, BAND.dmJ)
     say(@sprintf("    band program %.1f s (document %.1f, build %.1f, pattern %.1f, scatter %.1f)  %s",
                  time() - tj, BAND.timings.doc, BAND.timings.build, BAND.timings.pattern,

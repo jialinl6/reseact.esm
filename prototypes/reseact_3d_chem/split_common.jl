@@ -153,21 +153,31 @@ end
 #    `return_parts = true` returns `(docs, parts)`: `parts` is split_system's
 #    FlattenedSystem output, which the band program (tools/rx_band_program.jl)
 #    is built from -- it needs the part, not its re-emitted document.
+#    With RESEACT_CACHE_DIR set, `(docs, parts)` come from the setup cache
+#    (setup_cache.jl) when it holds them, for the default rule only (a custom
+#    `rule` is a function, which the key cannot capture).
 # --------------------------------------------------------------------------- #
+include(joinpath(@__DIR__, "setup_cache.jl"))
+
 function prepare_split_docs(model_path; rule = nothing, nparts = 2,
                             preserve_refs::Bool = true,
                             metaparameters::AbstractDict = Dict{String,Int}(),
-                            return_parts::Bool = false)
-    file = isempty(metaparameters) ? EA.load_path(model_path) :
-           EA.load_path(model_path; metaparameters = metaparameters)
-    flat = EA.flatten(file)                                # carries refs by default now (tier at build)
-    preserve_refs || (flat = EA.expand_flattened_refs(flat))
-    pre  = EA.algebraic_states_to_observeds(flat)
-    flat = EA.promote_downstream_shapes(pre)
-    promoted = EA.promoted_array_names(pre, flat)         # scalar chains lifted to the grid
-    r = rule === nothing ? stencil_following_rule(flat) : rule
-    parts = split_system(flat, r; nparts = nparts)        # [transport, chemistry]
-    docs = [index_promoted_refs_by_loop!(EA.flattened_to_esm(p), promoted) for p in parts]
+                            return_parts::Bool = false, say = println)
+    cache = rule === nothing ?
+        setup_cache("model preparation", model_path, metaparameters;
+                    extra = (; nparts, preserve_refs), say = say) : nothing
+    docs, parts = setup_cached(cache) do
+        file = isempty(metaparameters) ? EA.load_path(model_path) :
+               EA.load_path(model_path; metaparameters = metaparameters)
+        flat = EA.flatten(file)                            # carries refs by default now (tier at build)
+        preserve_refs || (flat = EA.expand_flattened_refs(flat))
+        pre  = EA.algebraic_states_to_observeds(flat)
+        flat = EA.promote_downstream_shapes(pre)
+        promoted = EA.promoted_array_names(pre, flat)     # scalar chains lifted to the grid
+        r = rule === nothing ? stencil_following_rule(flat) : rule
+        ps = split_system(flat, r; nparts = nparts)       # [transport, chemistry]
+        ([index_promoted_refs_by_loop!(EA.flattened_to_esm(p), promoted) for p in ps], ps)
+    end
     return return_parts ? (docs, parts) : docs
 end
 

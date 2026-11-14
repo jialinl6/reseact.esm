@@ -61,6 +61,18 @@
 # runner's layout, the bound plan decodes them in its own canonical order --
 # and it is what stands in for the assembly `prepare_jacobian` used to do
 # itself, now that the scatter `validate_plan` compares against is built here.
+#
+# THE SETUP CACHE (`cache`, prototypes/reseact_3d_chem/setup_cache.jl; off unless
+# RESEACT_CACHE_DIR is set) keeps everything here that does not depend on the
+# live buffers: the evaluation document (as the JSON the build parses), its
+# fields, the band model's var map, umap, the scatter, the pattern, the structure
+# and the row names. On a hit the document is built in the requested form over
+# the caller's buffers, and the build's var map and the runner's row names must
+# equal the cached ones, or everything is recomputed and the entry overwritten.
+# Neither the evaluation document, jacobian_pattern nor the scatter plan runs.
+# All three have to be cached together: on the cluster, with only the document
+# cached, jacobian_pattern took 12.5-14.7 s instead of 1.7 s, because computing
+# the document had memoised what it needs.
 # ===========================================================================
 
 module RxBandProgram
@@ -100,9 +112,29 @@ Base.show(io::IO, b::BandProgram) = print(io,
 _sysview(input, model_name) =
     model_name === nothing ? ED.sysview(input) : ED.sysview(input, String(model_name))
 
+# The band build: the evaluation document's JSON, built as a flattened component
+# tree or as the one-model document, in the form `kw` asks for. Materializes the
+# build's DiscreteMaterializer, if it has one, before anything reads the buffers.
+function _band_build(json::String, tree::Bool, kw, dmJ)
+    src = EA.load_string(json)
+    fJ, u0J, pJ, _, vmJ0 = tree ?
+        EA.build_evaluator(EA.flatten(src); kw...) :
+        EA.build_evaluator(src; model_name = "JacobianEval", kw...)
+    dmJ === nothing || dmJ.materialize!()
+    return fJ, length(u0J), pJ, Dict{String,Int}(String(k) => Int(v) for (k, v) in vmJ0)
+end
+
+# Informational. The traced callers hand the band program the RUNNER's `p`
+# (it is the differentiated payload), and the emitter reads a parameter by
+# name (`getfield(p, sym)`), so a band parameter the runner lacks fails the
+# trace by name if it is read and costs nothing if it is not.
+_pmissing(pJ, source_layout) = sort!(setdiff(collect(keys(pJ)), collect(keys(source_layout.p))))
+
+_secs(x) = string(round(x; digits = 1))
+
 """
     band_program(input; source_layout, model_name = nothing, build_kwargs = NamedTuple(),
-                 form = :oop) -> BandProgram
+                 form = :oop, cache = nothing) -> BandProgram
 
 Build the band program of `input`'s state Jacobian (a `FlattenedSystem`, or an
 `EsmFile` with `model_name`) and the index tables that place its output.
@@ -116,9 +148,45 @@ band build with `form` imposed; put the `materialize_out` the RHS uses in it.
 `form = :inplace` makes `fJ` an ordinary `f!(du, u, p, t)` for the native runner.
 Everything after the build -- `umap`, the pattern, the scatter -- is the same for
 both.
+
+`cache` is `nothing` (the default) or a `setup_cache(...)` handle
+(prototypes/reseact_3d_chem/setup_cache.jl) keyed on what `input` was prepared
+from; see this file's header. Prints one line, HIT or MISS, through `cache.say`.
 """
 function band_program(input; source_layout, model_name = nothing,
-                      build_kwargs = NamedTuple(), form::Symbol = :oop)
+                      build_kwargs = NamedTuple(), form::Symbol = :oop, cache = nothing)
+    vm = Dict{String,Int}(String(k) => Int(v) for (k, v) in source_layout.var_map)
+    rownames = first.(sort(collect(vm), by = last))
+    n = length(rownames)
+    n == length(source_layout.u0) || error(
+        "band_program: source_layout has $(length(source_layout.u0)) states but a " *
+        "$(length(vm))-entry var_map")
+    kw = merge(build_kwargs, (; form = form))
+    dmJ = get(build_kwargs, :materialize_out, nothing)
+
+    # ---- a setup-cache hit: build the cached document, reuse the rest -------
+    stale = ""
+    if cache !== nothing
+        tl = time(); st = cache.load(); tl = time() - tl
+        if st !== nothing
+            if st.rownames != rownames
+                stale = "the runner's state layout is not the cached one"
+            else
+                t1 = time()
+                fJ, NJ, pJ, vmJ = _band_build(st.json, st.tree, kw, dmJ)
+                tbuild = time() - t1
+                if vmJ == st.vmJ
+                    cache.say("    setup cache: $(cache.what) HIT, loaded in $(_secs(tl)) s  $(cache.file)")
+                    return BandProgram(fJ, pJ, vmJ, dmJ, st.fields, rownames, st.umap, zeros(NJ),
+                                       st.scatter, st.prototype, st.structure,
+                                       _pmissing(pJ, source_layout),
+                                       (doc = 0.0, build = tbuild, pattern = 0.0, scatter = 0.0))
+                end
+                stale = "the band build's var map is not the cached one"
+            end
+        end
+    end
+
     t0 = time()
     doc, fields0 = ED.evaluation_document(input; wrt = :states, model_name = model_name)
     fields = String.(fields0)
@@ -126,25 +194,12 @@ function band_program(input; source_layout, model_name = nothing,
 
     t1 = time()
     tree = length(doc["models"]) > 1
-    src = EA.load_string(ED.stable_json(doc))
-    kw = merge(build_kwargs, (; form = form))
-    fJ, u0J, pJ, _, vmJ0 = tree ?
-        EA.build_evaluator(EA.flatten(src); kw...) :
-        EA.build_evaluator(src; model_name = "JacobianEval", kw...)
-    vmJ = Dict{String,Int}(String(k) => Int(v) for (k, v) in vmJ0)
-    NJ = length(u0J)
-    dmJ = get(build_kwargs, :materialize_out, nothing)
-    dmJ === nothing || dmJ.materialize!()
+    json = ED.stable_json(doc)
+    fJ, NJ, pJ, vmJ = _band_build(json, tree, kw, dmJ)
     tbuild = time() - t1
     pfx = tree ? "JacobianEval." : ""
 
     # ---- the state lift: runner state i -> band-model slot ------------------
-    vm = Dict{String,Int}(String(k) => Int(v) for (k, v) in source_layout.var_map)
-    rownames = first.(sort(collect(vm), by = last))
-    n = length(rownames)
-    n == length(source_layout.u0) || error(
-        "band_program: source_layout has $(length(source_layout.u0)) states but a " *
-        "$(length(vm))-entry var_map")
     umap = Vector{Int}(undef, n)
     for (i, nm) in enumerate(rownames)
         j = get(vmJ, nm, 0)
@@ -209,13 +264,16 @@ function band_program(input; source_layout, model_name = nothing,
         "from the bound plan -- the two routes disagree on the pattern")
     tscat = time() - t3
 
-    # Informational. The traced callers hand the band program the RUNNER's `p`
-    # (it is the differentiated payload), and the emitter reads a parameter by
-    # name (`getfield(p, sym)`), so a band parameter the runner lacks fails the
-    # trace by name if it is read and costs nothing if it is not.
-    pmissing = sort!(setdiff(collect(keys(pJ)), collect(keys(source_layout.p))))
+    if cache !== nothing
+        ts = cache.store((; json, tree, fields, vmJ, rownames, umap, scatter,
+                            prototype = proto, structure = Symbol(structure)))
+        cache.say("    setup cache: $(cache.what) " *
+                  (isempty(stale) ? "MISS" : "STALE ($stale)") *
+                  ", computed in $(_secs(time() - t0)) s, " *
+                  (ts === nothing ? "not stored" : "stored in $(_secs(ts)) s") * "  $(cache.file)")
+    end
     return BandProgram(fJ, pJ, vmJ, dmJ, fields, rownames, umap, zeros(NJ), scatter,
-                       proto, Symbol(structure), pmissing,
+                       proto, Symbol(structure), _pmissing(pJ, source_layout),
                        (doc = tdoc, build = tbuild, pattern = tpat, scatter = tscat))
 end
 

@@ -71,12 +71,13 @@ function dev_body(half::Symbol)
 end
 
 const DEVPROGS = Dict{Tuple{Symbol,Symbol,Int,Bool},Any}()
-# The theta a call runs with, by default. For the chemistry that is the BARE THC,
-# so under RESEACT_FORCING_TIME=midstep a caller that does not pass the macro
-# step's `chem_theta(THC, ck.tf)` gets a type mismatch, not a stale forcing time.
+# The theta a call runs with, by default: the BARE THT / THC, so under
+# RESEACT_TRANSPORT_FORCING_TIME / RESEACT_FORCING_TIME=midstep a caller that does
+# not pass the macro step's `trans_theta(THT, ck.tf)` / `chem_theta(THC, ck.tf)`
+# gets a type mismatch, not a stale forcing time.
 dev_th(half::Symbol) = half === :T ? THT : THC
 # The theta a program is COMPILED (or traced) on: shapes only.
-dev_th_example(half::Symbol) = half === :T ? THT : THCX
+dev_th_example(half::Symbol) = half === :T ? THTX : THCX
 
 """
     dev_prog(kind, half, cap)
@@ -207,7 +208,7 @@ function devloop_replay_window(THT_, THC_)
     u = copy(UBASE)
     for ck in CKPTS
         refresh_forcing_if_needed(ck.epoch)
-        u = devloop_replay(:T, u, ck.seqT; TH = THT_)
+        u = devloop_replay(:T, u, ck.seqT; TH = trans_theta(THT_, ck.tf))
         u = devloop_replay(:C, u, ck.seqC; TH = chem_theta(THC_, ck.tf))
     end
     return dot(WOBJ, u)

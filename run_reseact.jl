@@ -80,6 +80,8 @@
 #                      evaluates its time-dependent inputs -- once at the macro step's
 #                      midpoint, as GEOS-Chem over its chemistry step, or at each stage
 #                      time, the exact reference (see where `fc` is built)
+#   RESEACT_TRANSPORT_FORCING_TIME  "stage" (default) or "midstep": the same choice for
+#                      the transport's time-dependent inputs (see `f_trans_run!`)
 #   RESEACT_CACHE_DIR  setup cache directory          (default: none = off). Keeps the
 #                      prepared model and the band program's static parts between runs,
 #                      keyed on the model, the metaparameters, this repo's HEAD and the
@@ -367,6 +369,19 @@ tgz(g, u, p, t) = (fill!(g, 0); nothing)   # chem tgrad is zero (autonomous over
 const FORCING_TIME = get(ENV, "RESEACT_FORCING_TIME", "midstep")
 FORCING_TIME in ("stage", "midstep") ||
     error("RESEACT_FORCING_TIME must be stage or midstep, got $FORCING_TIME")
+# THE TRANSPORT'S TIME-DEPENDENT INPUTS -- the GEOS-FP fields it blends in time between
+# records, the winds and the surface pressure among them -- under the same two modes. "stage" (the default for now) reads them at every SSPRK43 stage time, as
+# before. "midstep" reads them once per macro step, at its midpoint (TFORCE, as the
+# chemistry's), for every transport RHS call in it; GEOS-Chem likewise holds its A3
+# winds constant over each 3-h interval. Measured on the cluster (CONUS, 1 day, native,
+# against stage): time loop 4x5 8 threads 84.0 -> 71.0 s (-15 %), 2x2.5 8 threads
+# 317.1 -> 256.6 s (-19 %), 4x5 32 threads with the other changes on 53.2 -> 49.3 s;
+# relative differences O3 mean 1.1e-6, O3 min 2.5e-4, O3 max 2.9e-5, OH max 6.4e-4,
+# NO2 mean 1.5e-5, minimum air mass 2.6e-15, and the continuity diagnostic unchanged.
+const TRANSPORT_FORCING_TIME = get(ENV, "RESEACT_TRANSPORT_FORCING_TIME", "stage")
+TRANSPORT_FORCING_TIME in ("stage", "midstep") ||
+    error("RESEACT_TRANSPORT_FORCING_TIME must be stage or midstep, got $TRANSPORT_FORCING_TIME")
+const ANY_MIDSTEP = FORCING_TIME == "midstep" || TRANSPORT_FORCING_TIME == "midstep"
 const TFORCE = Ref(NaN)          # the current macro step's midpoint, set in the loop below
 f_chem_run!, jac_run! = FORCING_TIME == "midstep" ?
     let f = f_chem_cm!, j = jac_cm!
@@ -379,18 +394,29 @@ say("    chemistry time-dependent inputs at: " *
 FORCING_TIME == "midstep" && MACRO_DT > 600 &&
     say("    !! RESEACT_MACRO_DT=$(round(Int, MACRO_DT)) s under midstep: the chemistry's " *
         "time-dependent inputs are held fixed over each whole macro step (GEOS-Chem-like at 300 s)")
+f_trans_run! = TRANSPORT_FORCING_TIME == "midstep" ?
+    let f = f_trans_cm!
+        (du, u, p, t) -> f(du, u, p, TFORCE[])
+    end : f_trans_cm!
+say("    transport time-dependent inputs at: " *
+    (TRANSPORT_FORCING_TIME == "midstep" ?
+        "the macro-step midpoint, as GEOS-Chem holds its A3 winds (RESEACT_TRANSPORT_FORCING_TIME=midstep)" :
+        "each stage time, the exact reference (RESEACT_TRANSPORT_FORCING_TIME=stage)"))
 # `lie_trotter_solve` refreshes the forcing at any GEOS-FP boundary INSIDE a macro
 # step, and the rest of that step would then read the step's midpoint against a
 # bracket that no longer contains it. The default lattice (T0 on the cadence,
 # MACRO_DT dividing 1800) puts every boundary on a macro edge; refuse one that does not.
-if FORCING_TIME == "midstep"
+if ANY_MIDSTEP
     let inside = [b for b in run.tstops if T0 + 1e-6 < b < T_END - 1e-6 &&
-                                           abs(rem(b - T0, MACRO_DT, RoundNearest)) > 1e-6]
+                                           abs(rem(b - T0, MACRO_DT, RoundNearest)) > 1e-6],
+        which = join([k for (k, v) in ("RESEACT_FORCING_TIME" => FORCING_TIME,
+                                       "RESEACT_TRANSPORT_FORCING_TIME" => TRANSPORT_FORCING_TIME)
+                      if v == "midstep"], " and ")
         isempty(inside) ||
-            error("RESEACT_FORCING_TIME=midstep: $(length(inside)) GEOS-FP refresh times fall " *
+            error("$which=midstep: $(length(inside)) GEOS-FP refresh times fall " *
                   "inside a macro step (first at t=$(first(inside))); pick RESEACT_T0 / " *
                   "RESEACT_MACRO_DT so every refresh lands on a macro-step edge, or run " *
-                  "with RESEACT_FORCING_TIME=stage")
+                  "with $which=stage")
     end
 end
 fc = SciMLBase.ODEFunction(f_chem_run!; jac = jac_run!, jac_prototype = mkjp(), tgrad = tgz)
@@ -501,11 +527,12 @@ t = T0
 while t < T_END - 1e-9
     global nstep += 1
     tnext = min(t + MACRO_DT, T_END)
-    # Read only under RESEACT_FORCING_TIME=midstep. A bisected macro step keeps the
-    # midpoint of the WHOLE step [t, tnext] for both halves: the retry exists to get
-    # the same map through the solver, not to change the chemistry's inputs.
+    # Read only under RESEACT_FORCING_TIME / RESEACT_TRANSPORT_FORCING_TIME=midstep. A
+    # bisected macro step keeps the midpoint of the WHOLE step [t, tnext] for both
+    # halves: the retry exists to get the same map through the solver, not to change
+    # the chemistry's or the transport's inputs.
     TFORCE[] = t + (tnext - t) / 2
-    res = lie_trotter_solve_bisect(f_trans_cm!, fc, u, (t, tnext), run.p, inner_algs;
+    res = lie_trotter_solve_bisect(f_trans_run!, fc, u, (t, tnext), run.p, inner_algs;
         macro_dt = tnext - t, min_macro_dt = MIN_MACRO_DT,
         reltols = (RTOL, RTOL), abstols = (ATOL_T, ATOL),
         refresh = refresh_forcing, forcing_tstops = run.tstops, clamp_nonneg = true,

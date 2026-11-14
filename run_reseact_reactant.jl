@@ -96,6 +96,8 @@
 #                                step, or at each stage time, the exact reference (see
 #                                run_reseact.jl). A macro step here is one stop-grid
 #                                interval, so the midpoint is that interval's.
+#   RESEACT_TRANSPORT_FORCING_TIME  stage (default) | midstep -- the same choice for the
+#                                transport's inputs (see run_reseact.jl)
 #
 # Helper code it pulls in (see HELPERS.md for the migration plan):
 #   prototypes/reseact_3d_chem/{split_common,blockdiag_local,block_jac}.jl
@@ -355,14 +357,30 @@ say("  chemistry time-dependent inputs at: " *
 FORCING_MID && MACRO_DT > 600 &&
     say("  !! RESEACT_MACRO_DT=$(round(Int, MACRO_DT)) s under midstep: the chemistry's " *
         "time-dependent inputs are held fixed over each whole macro step (GEOS-Chem-like at 300 s)")
+# RESEACT_TRANSPORT_FORCING_TIME=midstep does the same for the transport (stage is the
+# default for now; see run_reseact.jl): its RHS reads the macro step's midpoint, `tmid`
+# in the transport `adaptive_solve`'s aux, for the same MLIR reason. Under stage the
+# aux and the program are what they were.
+const TRANSPORT_FORCING_TIME = get(ENV, "RESEACT_TRANSPORT_FORCING_TIME", "stage")
+TRANSPORT_FORCING_TIME in ("stage", "midstep") ||
+    error("RESEACT_TRANSPORT_FORCING_TIME must be stage or midstep, got $TRANSPORT_FORCING_TIME")
+const TRANSPORT_MID = TRANSPORT_FORCING_TIME == "midstep"
+say("  transport time-dependent inputs at: " *
+    (TRANSPORT_MID ?
+        "the macro-step midpoint, as GEOS-Chem holds its A3 winds (RESEACT_TRANSPORT_FORCING_TIME=midstep)" :
+        "each stage time, the exact reference (RESEACT_TRANSPORT_FORCING_TIME=stage)"))
 adv = let gT = g4[1], gC = g4[2], NS = NS, NC = NC, masks = masks,
-         PLAN = PLAN, gjbJ = gjbJ, SYMJAC = SYMJAC, FORCING_MID = FORCING_MID
+         PLAN = PLAN, gjbJ = gjbJ, SYMJAC = SYMJAC, FORCING_MID = FORCING_MID,
+         TRANSPORT_MID = TRANSPORT_MID
     (uR, pR, t0R, t1R, dtTR, dtCR, bufsT, bufsC, bufsJ) -> begin
         tmidR = (t0R + t1R) / 2
         fT = (u, t, dtc, aux) -> RxTracedIntegrator.ssprk43_step(
-            (uu, tt) -> gT(uu, aux.p, tt, aux.bufs), u, t, dtc, ATOL_T, RTOL)
+            (uu, tt) -> gT(uu, aux.p, TRANSPORT_MID ? aux.tmid : tt, aux.bufs), u, t, dtc,
+            ATOL_T, RTOL)
         uT, _, dtTend, naT, nrT = RxTracedIntegrator.adaptive_solve(
-            fT, uR, t0R, t1R, dtTR, CTRL_T, (p = pR, bufs = bufsT); clamp_nonneg = true)
+            fT, uR, t0R, t1R, dtTR, CTRL_T,
+            TRANSPORT_MID ? (p = pR, bufs = bufsT, tmid = tmidR) : (p = pR, bufs = bufsT);
+            clamp_nonneg = true)
         fC = (u, t, dtc, aux) -> RxTracedIntegrator.ros23_step(
             (uu, tt) -> gC(uu, aux.p, FORCING_MID ? aux.tmid : tt, aux.bufs), u, t, dtc,
             NS, NC, masks, ATOL_C, RTOL;

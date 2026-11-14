@@ -155,6 +155,14 @@ let ft = get(ENV, "RESEACT_FORCING_TIME", "stage")
         error("tools/sensitivity_forward.jl supports RESEACT_FORCING_TIME=stage only " *
               "(got $ft); run the adjoint arm (RESEACT_DEMO=adjoint) for midstep")
 end
+# The same for the transport's inputs (RESEACT_TRANSPORT_FORCING_TIME, stage by default).
+let ft = get(ENV, "RESEACT_TRANSPORT_FORCING_TIME", "stage")
+    ft in ("stage", "midstep") ||
+        error("RESEACT_TRANSPORT_FORCING_TIME must be stage or midstep, got $ft")
+    ft == "stage" ||
+        error("tools/sensitivity_forward.jl supports RESEACT_TRANSPORT_FORCING_TIME=stage only " *
+              "(got $ft); run the adjoint arm (RESEACT_DEMO=adjoint) for midstep")
+end
 const FDREL     = [parse(Float64, s) for s in
                    split(get(ENV, "RESEACT_SENS_FD", "1e-2,1e-3,1e-4,1e-5,1e-6,1e-7"), ',')]
 _env(k, d) = parse(Int, get(ENV, "RESEACT_$k", string(d)))

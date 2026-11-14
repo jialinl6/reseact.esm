@@ -256,7 +256,8 @@ matter: `RESEACT_RES` (GEOS-FP resolution), `RESEACT_NLON/NLAT/NLEV` and
 `RESEACT_ADJ_CSV` (gradient output), `RESEACT_FORCING_TIME` (`midstep`, the default:
 the chemistry's time-dependent inputs at the macro-step midpoint, as GEOS-Chem over
 its chemistry step; or `stage`, at every stage time, the exact reference; all three
-runners take it, see `HELPERS.md`). The runner prints a **provenance block** at
+runners take it, see `HELPERS.md`), `RESEACT_TRANSPORT_FORCING_TIME` (`stage`, the
+default, or `midstep`: the same choice for the transport's inputs, see `HELPERS.md`). The runner prints a **provenance block** at
 start — the git HEAD and dirty state of this repo and of every developed sibling — so
 a logged result can be tied to commits.
 

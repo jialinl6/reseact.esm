@@ -161,6 +161,32 @@ How each runner carries the midpoint:
   print a note, and an explicit `midstep` is refused. `tools/sensitivity_forward.jl`
   (the forward arm of `run_reseact_adjoint.jl`) does the same.
 
+**Transport forcing time — `RESEACT_TRANSPORT_FORCING_TIME=stage|midstep`.** The same
+choice for the transport's time-dependent inputs, the GEOS-FP fields it blends in time
+between records (the winds and the surface pressure among them). `stage` is the default
+for now and is the behaviour before the switch existed. `midstep` reads them once per
+macro step, at its midpoint, for every transport RHS call in it, as GEOS-Chem holds its
+A3 winds constant over each 3-h interval. It is independent of `RESEACT_FORCING_TIME`,
+and when both are `midstep` the two halves read the same midpoint. Every runner prints
+which mode it runs, and any other value is an error.
+
+Measured on the cluster (CONUS, 1 day, native, against `stage`): time loop 4x5 8 threads
+84.0 → 71.0 s (−15 %), 2x2.5 8 threads 317.1 → 256.6 s (−19 %), 4x5 32 threads with the
+other changes on 53.2 → 49.3 s. Relative differences: O3 mean 1.1e-6, O3 min 2.5e-4,
+O3 max 2.9e-5, OH max 6.4e-4, NO2 mean 1.5e-5, minimum air mass 2.6e-15; the continuity
+diagnostic is unchanged.
+
+* `run_reseact.jl` — the transport RHS handed to `lie_trotter_solve_bisect` reads
+  `TFORCE`, also for both halves of a bisected step. The refusal of a GEOS-FP refresh
+  inside a macro step applies under either switch.
+* `run_reseact_reactant.jl` — `tmid` in the transport `adaptive_solve`'s `aux`. Under
+  `stage` the aux and the compiled program are unchanged.
+* `tools/adjoint_gradient.jl` — `tf` in the transport theta (`trans_theta`), the
+  checkpointed `Ckpt.tf` of each macro step, as the chemistry's, for the forward step,
+  every replay, VJP, JVP, fd replay and the frozen device loop. `RESEACT_SUBCYCLE` /
+  `RESEACT_BUCKET` follow the chemistry switch's rules (an explicit `midstep` is refused),
+  and so does `tools/sensitivity_forward.jl`.
+
 ### `run_reseact.jl` (native in-place) — the above **plus** `op_split.jl`.
 
 Builds two in-place `f!(du,u,p,t)` closures and drives the Lie-Trotter split with

@@ -146,12 +146,20 @@ end
 # it costs no ForwardDiff Dual compile.
 #
 # The scatter is resolved to cell-major block positions once, here: each band
-# entry (slot, nzval position) becomes (slot, linear index into the NS x NS x NC
-# block data). An entry coupling two cells would mean the chemistry is not
-# block-diagonal, and is an error. `p` is unused at call time: the band build
+# entry (slot, nzval position) becomes (slot, its cell, linear index into that
+# cell's NS x NS block). An entry coupling two cells would mean the chemistry is
+# not block-diagonal, and is an error. `p` is unused at call time: the band build
 # reads its own `band.pJ`, bound to the same live forcing buffers as the RHS. Its
 # DiscreteMaterializer (`band.dmJ`) has to be re-materialized at every forcing
 # refresh, with the RHS halves'.
+#
+# The entries are then grouped by cell with a STABLE sort, so block c's entries
+# are ptr[c]:ptr[c+1]-1 in their original order, and each call zeroes and fills
+# the blocks one cell at a time on `alg`'s map (`foreach_block`). The blocks are
+# disjoint and every position receives the same additions in the same order as
+# in one serial pass over all entries, so the result is bit-identical to it.
+# Measured on the cluster (CONUS 4x5, 1 day): -11 % of the time loop at 32
+# threads, neutral at 8.
 function block_sym_jac(band, sm_of_cm, NS, NC; alg = MapBroadcast())
     N = NS * NC
     N == length(sm_of_cm) || error("block_sym_jac: NS*NC=$N != length(sm_of_cm)=$(length(sm_of_cm))")
@@ -163,29 +171,51 @@ function block_sym_jac(band, sm_of_cm, NS, NC; alg = MapBroadcast())
     for c in 1:N, q in proto.colptr[c]:(proto.colptr[c+1] - 1)
         colof[q] = c
     end
-    slot = Vector{Int}(undef, length(band.scatter)); lin = Vector{Int}(undef, length(band.scatter))
+    K = length(band.scatter)
+    slot0 = Vector{Int}(undef, K); cell = Vector{Int}(undef, K); off0 = Vector{Int}(undef, K)
     for (k, (s, pos)) in enumerate(band.scatter)
         rs, cs = proto.rowval[pos], colof[pos]
         cr, ir = divrem(cm_of_sm[rs] - 1, NS)
         cc, ic = divrem(cm_of_sm[cs] - 1, NS)
         cr == cc || error("block_sym_jac: band entry ($(band.rownames[rs]), $(band.rownames[cs])) " *
                           "couples cell $(cr + 1) to cell $(cc + 1); the chemistry Jacobian is not block-diagonal")
-        slot[k] = s
-        lin[k] = 1 + ir + ic * NS + cr * NS * NS
+        slot0[k] = s
+        cell[k] = cr + 1
+        off0[k] = 1 + ir + ic * NS
     end
+    ord = sortperm(cell)                      # stable: a cell's entries keep their order
+    slot = slot0[ord]; off = off0[ord]
+    cnt = zeros(Int, NC)
+    for c in cell; cnt[c] += 1; end
+    ptr = [1; 1 .+ cumsum(cnt)]               # block c's entries: ptr[c]:ptr[c+1]-1
     # u_cm -> species-major -> band-model slot, fused into one gather. uj's other
     # slots (the band fields' own states) stay at the zeros the band program left.
     jmap = band.umap[sm_of_cm]
     fJ, pJ = band.fJ, band.pJ
     uj = copy(band.uj); duj = similar(uj)
+    NB = NS * NS
     function jac_cm!(J, u_cm, p, t)
         @inbounds for i in 1:N; uj[jmap[i]] = u_cm[i]; end
         fJ(duj, uj, pJ, t)
         data = J.data
-        fill!(data, 0)
-        @inbounds for k in eachindex(slot); data[lin[k]] += duj[slot[k]]; end
+        foreach_block(NC, alg) do c
+            base = (c - 1) * NB
+            @inbounds for i in (base + 1):(base + NB); data[i] = 0.0; end
+            @inbounds for q in ptr[c]:(ptr[c + 1] - 1); data[base + off[q]] += duj[slot[q]]; end
+            return nothing
+        end
         return nothing
     end
     mkjp() = BlockDiagonal(zeros(NS, NS, NC), alg)   # alg: what its LU and solve map over the cells with
     return jac_cm!, mkjp
+end
+
+# `f(c)` for every cell block c in 1:NC. On MapPolyester it runs on Polyester's
+# worker pool through the same map the block LU and solve use; with any other
+# `alg` (MapBroadcast, the default), or when this EarthSciMLBase checkout has no
+# MapPolyester methods for blockdiag_local.jl to load, it is one serial loop.
+foreach_block(f, NC, alg) = (for c in 1:NC; f(c); end; nothing)
+if isdefined(BlockDiag, :MapPolyester) && isfile(BlockDiag._MB_POLYESTER)
+    foreach_block(f, NC, alg::BlockDiag.MapPolyester) =
+        (BlockDiag.map_closure_to_range(f, 1:NC, alg); nothing)
 end

@@ -290,7 +290,8 @@ f_chem_cm!  = cellmajor_rhs(run.funcs[2], P.sm_of_cm)
 # The chemistry W's block LU and solve run on Polyester's worker pool (MapPolyester), the pool EarthSciAST's kernels
 # use: handed to ordinary Julia tasks between those kernels they wait on its spinning workers and run nearly serially.
 # Bit-identical digest, 20% off the CONUS time loop on top of the generic LU. Needs an EarthSciMLBase checkout with
-# MapPolyester (src/map_algorithm.jl + ext/polyester_map.jl; see README).
+# MapPolyester (src/map_algorithm.jl + ext/polyester_map.jl; see README). Under sym the Jacobian's per-cell block fill
+# runs on the same map (block_sym_jac).
 jac_cm!, mkjp = JACMODE == "fd"  ? block_fd_jac(f_chem_cm!, P.NS, P.NC; alg = MapPolyester()) :
                 JACMODE == "sym" ? block_sym_jac(BAND, P.sm_of_cm, P.NS, P.NC; alg = MapPolyester()) :
                                    block_ad_jac(run.funcs[2], P.sm_of_cm, P.NS, P.NC; alg = MapPolyester())

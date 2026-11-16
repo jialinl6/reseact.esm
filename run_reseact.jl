@@ -283,7 +283,8 @@ if JACMODE == "sym"
     BAND = band_program(parts[2]; source_layout = (u0 = run.u0, p = run.p, var_map = run.var_map),
                         build_kwargs = (; run.build_kwargs..., materialize_out = EA.DiscreteMaterializer()),
                         form = :inplace,
-                        cache = setup_cache("band program", MODEL, GRID_MP; extra = (; part = 2), say = say))
+                        cache = setup_cache("band program", MODEL, GRID_MP; extra = (; part = 2), say = say),
+                        data_sources = EA.load_path(MODEL; metaparameters = GRID_MP).data_sources)
     push!(run.dms, BAND.dmJ)
     say(@sprintf("    band program %.1f s (document %.1f, build %.1f, pattern %.1f, scatter %.1f)  %s",
                  time() - tj, BAND.timings.doc, BAND.timings.build, BAND.timings.pattern,

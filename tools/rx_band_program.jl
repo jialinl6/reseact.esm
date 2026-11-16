@@ -154,7 +154,8 @@ both.
 from; see this file's header. Prints one line, HIT or MISS, through `cache.say`.
 """
 function band_program(input; source_layout, model_name = nothing,
-                      build_kwargs = NamedTuple(), form::Symbol = :oop, cache = nothing)
+                      build_kwargs = NamedTuple(), form::Symbol = :oop, cache = nothing,
+                      data_sources = nothing)
     vm = Dict{String,Int}(String(k) => Int(v) for (k, v) in source_layout.var_map)
     rownames = first.(sort(collect(vm), by = last))
     n = length(rownames)
@@ -188,7 +189,11 @@ function band_program(input; source_layout, model_name = nothing,
     end
 
     t0 = time()
-    doc, fields0 = ED.evaluation_document(input; wrt = :states, model_name = model_name)
+    # EarthSciASTDiff 0.6: a FlattenedSystem carries no data_sources, so the data-fed parameters' sources are passed
+    # (as EarthSciIntegrator passes the loaded file's); `nothing` keeps the 0.3 call
+    doc, fields0 = data_sources === nothing ?
+        ED.evaluation_document(input; wrt = :states, model_name = model_name) :
+        ED.evaluation_document(input; wrt = :states, model_name = model_name, data_sources = data_sources)
     fields = String.(fields0)
     tdoc = time() - t0
 

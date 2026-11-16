@@ -1,5 +1,5 @@
 {
-  "esm": "1.0.0",
+  "esm": "2.0.0",
   "metadata": {
     "name": "ReSEACT3DChem",
     "description": "ReSEACT 3-D transport on a NATIVE slice of a GEOS-FP grid, driven by real GEOS-FP meteorology. NO REGRIDDING: the local grid IS the native grid, so the whole conservative-overlap chain collapses to an index shift. The slice is (LON0, LAT0) + (NLON, NLAT, NLEV): local lon cell i is native LON0+i and local lat point j is native LAT0+j. The defaults 11/29 x 13x7x72 are lon centres -125..-65, lat points 26..50 -- the full CONUS span at 4x5 resolution, and the domain the runners simulate by default; LON0=14 with NLON=7 narrows it to -110..-80, the smaller central-US box the model was first developed on.\\n\\nRESOLUTION. Every parameter default in this file is 4x5, but nothing in the model is welded to it: the forcing arrays are declared over the SYMBOLIC dims gf_lon/gf_lat/gf_lev/gf_t and sized from the files at bind time, and the four numbers that do carry a resolution -- lon0_deg, lat0_deg, dlon_deg, dlat_deg -- are parameters (dlon_deg/dlat_deg were literal equations until 2026-09-05, which is what made 4x5 structural rather than merely default). `native_slice(res = \\\"2x2.5\\\")` in prototypes/reseact_3d_chem/split_common.jl overrides all four, the LON0/LAT0/NLON/NLAT metaparameters and the GEOS-FP URL together from one table row; the rows are 4x5, 2x2.5, 0.25x0.3125 and 0.25x0.3125_CH, and the same CONUS footprint is 13x7 columns at 4x5, 25x13 at 2x2.5 and 193x97 at 0.25x0.3125. The vertical is 72 hybrid levels in ALL of them, so dA/dB/Ap/Bp and NLEV never change with the horizontal.\n\nTransport is the monotone flux-form PPM stack imported BY REFERENCE from EarthSciDiscretizations: regional open-wall inflow BCs on lon/lat, and the HYBRID sigma-pressure massform vertical (dp = dA[k] + dB[k]*PS(i,j,t)) on lev. The horizontal and vertical rule stack is byte-identical to the verified prototypes/transport_3d/transport_3d.esm; only the FORCING differs — the analytic test winds and constant PS are replaced by GEOS-FP U/V/OMEGA/PS, each supplied by an EarthSciIO discrete_provider returning the TWO records bracketing the solver time and blended continuously in time (records_per_sample=2 + w_time, the era5 pattern).\n\nGEOS-FP's collections are not co-phased, so three independent weights are used: w_I3 (PS, 3-hourly instantaneous at 00:00Z), w_A3 (U/V/OMEGA, 3-hourly means at 01:30Z) and w_A1 (PBLH, hourly means at 00:30Z).\n\nFace fluxes follow the metric the ESD divergence stencils imply on the unit sphere: Mx = dp_face*U_face/a and My = dp_face*V_face/a (Pa/s, matching m in Pa), with the A-grid GEOS-FP winds averaged to faces. Mz is NOT taken from GEOS-FP's OMEGA. It is DIAGNOSED from continuity, the standard offline-CTM construction: integrating dm_k/dt = -(divh_fix_k + Mz[k+1] - Mz[k]) upward from a rigid ground with the requirement that m reproduce the hydrostatic thickness gives Mz[ke] = -sum_{k<ke}(dB[k]*dPSdt + divh_fix[k]), +ve UPWARD at each cell's LOWER edge. Mz[1] = 0 falls out as the empty sum and Mz[NLEV+1] = 0 because sum_k dB[k] = 1 and the pressure fixer makes sum_k divh_fix[k] = -dPSdt exactly -- so the diagnosed field satisfies the no-flux walls the massform stencils already assume, rather than merely being clipped by them. Using OMEGA directly instead is what made m drift from dp; see caveat (4).\n\nCHEMISTRY + PHOTOLYSIS. The SuperFast gas-phase mechanism (EarthSciModels components/gaschem/superfast.esm) is lifted onto the slice by operator_compose with pointwise lifting, and its six photolysis rates come from the Fast-JX component (components/gaschem/fastjx/fastjx_interp_troposphere.esm) rather than being fixed numbers.\n\nWHICH Fast-JX, and why. The fastjx/ directory holds two variants. fastjx.esm scales each of its 18 actinic-flux bands as max(0, cos_sza * const_i), with no pressure dependence at all; fastjx_interp_troposphere.esm interpolates the flux bilinearly on a real (cos_sza, P) table, which gives it genuine vertical structure, and that is the one mounted here. Since stage 1 of the 2026-10-28 stack sync it matches jialinl6/GasChemMTK.jl@37792b29 (branch superfast-gas-only): it computes the solar position itself from lat, long and the UTC clock t + t_ref (NOAA Spencer equation of time), rather than taking cos_sza as an input. Its calendar runs datetime.* on t + t_ref, which EarthSciAST evaluates as branch-free arithmetic (ess-traced-datetime, 2026-08-06), so it takes the solver time and traces under Reactant -- the same calendar NEIRegrid's local-hour clock uses.\n\nSo Transport3D no longer carries a solar chain. It hands FastJX the per-cell latitude and longitude (lat_c, lon_c, from the grid's own lat_coord / lon_coord templates) and the model epoch t_ref = 2016-01-01T00:00:00Z, which makes t + t_ref the UTC clock; the sun moves with the solve.\n\nFast-JX has no ODEs, so it is NOT operator_composed; it is lifted purely by SHAPE. Six param_to_var edges hand it its inputs — lat_c, lon_c, Tc and Pc (the same GEOS-FP temperature and hybrid mid-layer pressure SuperFast reads) and H2Oc, all grid-shaped, plus the scalar epoch t_ref — and promote_downstream_shapes then carries [lon,lat,lev] through the whole flux -> cross-section -> j-rate chain. Six more edges map j_H2O2 / j_H2COa / j_H2COb / j_CH3OOH / j_NO2 / j_o32OH onto SuperFast's jH2O2 / jH2COa / jH2COb / jCH3OOH / jNO2 / jO32OH (the wiring of the EarthSciModels coupling library couplings/fastjx_superfast.esm, spelled out inline — see the first of those edges for why). The splitter's stencil_vs_pointwise rule puts the entire photolysis chain in the POINTWISE half, alongside the chemistry it drives.\n\nDEPOSITION AND EMISSIONS, as of the 2026-10-28 stack sync. Dry deposition is EarthSciModels' wesley_dry_gas.esm = jialinl6/DepositionMTK.jl@cbe7d7db (branch superfast-gas-only) DryDepositionGasFractional: the Wesely mosaic over 11 land-use classes, whose fractions f_<class> come from the 0.05 deg MODIS land use (EarthSciModels wesely_landuse.esm) area-averaged onto each cell by LandUseRemap, as upstream's _remap_landuse does; the season comes from the UTC month (season_c), and z / del_P are upstream's corrected first-level midpoint height and thickness. CH2O deposits with k_CH2O, and NO is not dry-deposited. NEI2016 is EarthSciML/EarthSciData.jl PR #226 (head jialinl6:Oct_merge @87f8da1): the merged surface file plus the six inline point sectors (mounted as NEI2016Elevated), all regridded by NEIRegrid; the point sectors are spread over layers 1-11 by GEOS-Chem's per-sector profiles, NOx and isoprene follow the round(lon/15) clock, and NO converts with MW_NO2. Each layer's emission is divided by its instantaneous thickness dp (the air the transport carries), where upstream uses a time-mean dry thickness table.\n\nCAVEATS. (1) PS is read in hPa and scaled by 100 — the loader declares Pa but EarthSciIO returns raw file values. (2) The lev no-flux BC is baked into the stencils (they never read Mz[1] or Mz[NLEV+1]), so the 7-level slab is CLOSED at its ~906 hPa top even though real air flows through it — a truncated-column artifact, negligible over the 1 s first-light window but not for long runs. (3) The two end lat rows are half-width (lat_edge clamps them) while native lat cells are a full 4 deg. (4) PRESSURE FIXER, and the mass source it implies. GEOS-FP's A3 winds are 3-hourly MEANS while its I3 surface pressure is INSTANTANEOUS, so the two disagree: the column-integrated horizontal mass divergence divh_col does not equal -dPSdt, and the discrete identity d(dp)/dt + div(M) = 0 fails (Jockel et al. 2001). Left alone, m wandered away from dp = dA[k] + dB[k]*PS at ~3e-6 1/s and the long runs died of it. The fixer is COLUMN-LOCAL: divh_fix = divh + (-dPSdt - divh_col)*dp/dp_col spreads the column imbalance over the levels by dp weight, Mz is diagnosed from divh_fix, and -- this is the part that has to match -- the CONTINUITY equation reads the same divh_fix. Pairing a divh_fix-derived Mz with the raw divergence leaves the correction uncancelled and reproduces the drift almost exactly; that was a real bug, caught by tools/continuity_residual.jl, whose signature is a residual that is CONSTANT down each column in dp-relative terms. With both sides consistent, dm_k/dt = dB[k]*dPSdt to roundoff -- measured 1.3e-17 1/s rms (max 3.5e-16) on the RHS itself over a 7x7x72 slice, and integrating for 30 simulated minutes leaves max|m - dp|/dp at 2.6e-13, growing SUBLINEARLY across the six macro steps (1.05, 1.77, 1.98, 2.21, 2.54, 2.61 e-13), which is bounded accumulation roundoff rather than a residual bias. Note what this does and does not buy. The column budget is OVER-DETERMINED -- sum_k dm_k/dt is pinned to -divh_col by the no-flux top and bottom walls whatever Mz does, while the target sums to dPSdt -- so making m track dp REQUIRES a mass source equal to that imbalance (~4e-6 1/s here, ~1.3% of column mass per hour). This form ABSORBS it rather than eliminating it. Eliminating it means adjusting Mx and My so divh_col == -dPSdt, a 2-D Poisson solve for a velocity potential, which is not a column-local operation and is not what this is. Composition is untouched either way: the species stay in CWC mixing-ratio form with the RAW div(M), which is exactly the mixing-ratio equation implied by carrying the source at the local mixing ratio, so the correction cancels out of dq/dt identically. CWC is verified, not asserted: tools/cwc_gate.jl synthesises a gate copy of this model and finds max|q-1| == 0 EXACTLY in both the mixing-ratio form the species use and the mass form mqg/mg, with tracer mass bitwise equal to air mass throughout, and each of the three axes' tracer-vs-continuity divergence difference exactly 0.0 at every cell -- including through the diagnosed Mz. (The composite three-axis sum shows ~1e-17, which the per-axis states prove is the association order of two sums of bitwise-identical addends in the emitted code, not the operator.) (5) FastJX.H2O is the REAL 3-D field (Transport3D.Qc, from GEOS-FP I3 specific humidity QV). It started life as a single tropospheric scalar and that turned out to be fatal, not cosmetic: the O(1D)+H2O -> 2OH branching depends on the H2O MIXING RATIO alone, so a constant 1.84% overstates the OH yield ~3,320x above 12 km and drove a HOx runaway that killed the solver 20 simulated minutes into a dawn run at NLEV=72. NOTE the remaining inconsistency: SuperFast's own H2O is still a constant 1.839e7 ppb reservoir, so the mechanism and the photolysis now disagree about humidity aloft. Coupling Transport3D.Qc -> SuperFast.H2O would close that, but it changes the MECHANISM's water, not just a photolysis input. (6) Fast-JX here is the TROPOSPHERIC table. Its (cos_sza, P) flux lookup already has a CLIMATOLOGICAL clear-sky overhead-ozone column baked in — that is exactly what makes it usable at the surface, and why its j_O31D at overhead sun (3.4e-5 1/s, the textbook value) is ~206x smaller than the sibling fastjx.esm's unattenuated max(0, cos_sza*const_i) form (6.9e-3 1/s, a top-of-atmosphere number). What is NOT modelled is any VARIATION about that climatology: no prognostic O3 column, no cloud, no aerosol, no surface albedo. The P axis spans 1000..100000 Pa, so the surface layer at ~101325 Pa clamps to the last column (a 1.3% extrapolation declined); every level above is interpolated. (7) The upstream fastjx_interp_troposphere.esm carried a trivial `NO2` state with D(NO2) = -j_NO2*NO2 purely as an \"ODE skeleton\" for its example plots. That state is incompatible with mounting the component on a grid — once cos_sza/T/P arrive per cell every observed is promoted to [lon,lat,lev], leaving a SCALAR state with an array-valued RHS — so it was removed upstream, making the component stateless like its sibling fastjx.esm. Its three inline tests assert only J-rates and F_i at t=0 and are unaffected. (8) The tables' ABSOLUTE calibration is inherited, not audited here: at overhead sun they give j_NO2 = 2.1e-3 1/s, where the commonly cited clear-sky noon value is nearer 8e-3 1/s (the sibling fastjx.esm gives 3.9e-3). j_O31D, by contrast, lands on the textbook value. Both components come from the same GasChem.jl migration, so a low j_NO2 normalisation is an UPSTREAM question, not an artifact of this model's wiring — flagged because photolysis of NO2 sets the NOx-O3 photostationary state and therefore most of the O3 response seen here.",
@@ -138,6 +138,18 @@
             "NLAT": "NLAT",
             "NLEV": "NLEV"
           }
+        },
+        {
+          "ref": "esm:std/calendar.esm",
+          "only": [
+            "month"
+          ]
+        },
+        {
+          "ref": "esm:std/interp.esm",
+          "only": [
+            "linear"
+          ]
         }
       ],
       "variables": {
@@ -1516,7 +1528,7 @@
             ]
           },
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "i",
               "j",
@@ -3241,7 +3253,7 @@
         {
           "lhs": "Mx",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gie",
               "gj",
@@ -3650,7 +3662,7 @@
         {
           "lhs": "My",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gje",
@@ -4107,7 +4119,7 @@
         {
           "lhs": "PS",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -4199,7 +4211,7 @@
         {
           "lhs": "dp",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -4258,7 +4270,7 @@
         {
           "lhs": "dPSdt",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -4360,7 +4372,7 @@
         {
           "lhs": "divh_col",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -4394,7 +4406,7 @@
         {
           "lhs": "dp_col",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -4428,7 +4440,7 @@
         {
           "lhs": "divh_fix",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -4524,7 +4536,7 @@
         {
           "lhs": "Mz",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -4601,7 +4613,7 @@
         {
           "lhs": "PBLH",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -4687,7 +4699,7 @@
         {
           "lhs": "Tc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -4779,7 +4791,7 @@
         {
           "lhs": "Pc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -4911,7 +4923,7 @@
         {
           "lhs": "lat_c",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -4943,7 +4955,7 @@
         {
           "lhs": "lon_c",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -4975,10 +4987,11 @@
         {
           "lhs": "season_c",
           "rhs": {
-            "op": "fn",
-            "name": "interp.linear",
-            "args": [
-              {
+            "op": "apply_expression_template",
+            "args": [],
+            "name": "linear",
+            "bindings": {
+              "table": {
                 "op": "const",
                 "args": [],
                 "value": [
@@ -4996,7 +5009,7 @@
                   4.0
                 ]
               },
-              {
+              "axis": {
                 "op": "const",
                 "args": [],
                 "value": [
@@ -5014,26 +5027,28 @@
                   12.0
                 ]
               },
-              {
-                "op": "fn",
-                "name": "datetime.month",
-                "args": [
-                  {
+              "x": {
+                "op": "apply_expression_template",
+                "args": [],
+                "name": "month",
+                "bindings": {
+                  "t": {
                     "op": "+",
                     "args": [
                       "t",
                       "t_ref"
                     ]
                   }
-                ]
-              }
-            ]
+                }
+              },
+              "n": 12
+            }
           }
         },
         {
           "lhs": "H2Oc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -5210,7 +5225,7 @@
         {
           "lhs": "TSc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -5300,7 +5315,7 @@
         {
           "lhs": "QVc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -5392,7 +5407,7 @@
         {
           "lhs": "T2Mc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -5482,7 +5497,7 @@
         {
           "lhs": "QV2Mc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -5572,7 +5587,7 @@
         {
           "lhs": "Z0Mc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -5662,7 +5677,7 @@
         {
           "lhs": "USTARc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -5752,7 +5767,7 @@
         {
           "lhs": "SWGDNc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -5842,7 +5857,7 @@
         {
           "lhs": "HFLUXc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -5932,7 +5947,7 @@
         {
           "lhs": "levc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -5962,7 +5977,7 @@
         {
           "lhs": "rhoA",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -6023,7 +6038,7 @@
         {
           "lhs": "delP1",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -6068,7 +6083,7 @@
         {
           "lhs": "Zagl",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -6232,7 +6247,7 @@
         {
           "lhs": "Lmo",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -6325,7 +6340,7 @@
         {
           "lhs": "cloudFracc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -6417,7 +6432,7 @@
         {
           "lhs": "qrainc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -6603,7 +6618,7 @@
         {
           "lhs": "qbc_w_NO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6623,7 +6638,7 @@
         {
           "lhs": "qbc_e_NO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6643,7 +6658,7 @@
         {
           "lhs": "qbc_s_NO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6663,7 +6678,7 @@
         {
           "lhs": "qbc_n_NO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6683,7 +6698,7 @@
         {
           "lhs": "qbc_w_CO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6703,7 +6718,7 @@
         {
           "lhs": "qbc_e_CO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6723,7 +6738,7 @@
         {
           "lhs": "qbc_s_CO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6743,7 +6758,7 @@
         {
           "lhs": "qbc_n_CO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6763,7 +6778,7 @@
         {
           "lhs": "qbc_w_ISOP",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6783,7 +6798,7 @@
         {
           "lhs": "qbc_e_ISOP",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6803,7 +6818,7 @@
         {
           "lhs": "qbc_s_ISOP",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6823,7 +6838,7 @@
         {
           "lhs": "qbc_n_ISOP",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6843,7 +6858,7 @@
         {
           "lhs": "qbc_w_HNO3",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6863,7 +6878,7 @@
         {
           "lhs": "qbc_e_HNO3",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6883,7 +6898,7 @@
         {
           "lhs": "qbc_s_HNO3",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6903,7 +6918,7 @@
         {
           "lhs": "qbc_n_HNO3",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6923,7 +6938,7 @@
         {
           "lhs": "qbc_w_NO2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6943,7 +6958,7 @@
         {
           "lhs": "qbc_e_NO2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6963,7 +6978,7 @@
         {
           "lhs": "qbc_s_NO2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -6983,7 +6998,7 @@
         {
           "lhs": "qbc_n_NO2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7003,7 +7018,7 @@
         {
           "lhs": "qbc_w_HO2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7023,7 +7038,7 @@
         {
           "lhs": "qbc_e_HO2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7043,7 +7058,7 @@
         {
           "lhs": "qbc_s_HO2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7063,7 +7078,7 @@
         {
           "lhs": "qbc_n_HO2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7083,7 +7098,7 @@
         {
           "lhs": "qbc_w_CH3OOH",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7103,7 +7118,7 @@
         {
           "lhs": "qbc_e_CH3OOH",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7123,7 +7138,7 @@
         {
           "lhs": "qbc_s_CH3OOH",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7143,7 +7158,7 @@
         {
           "lhs": "qbc_n_CH3OOH",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7163,7 +7178,7 @@
         {
           "lhs": "qbc_w_OH",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7183,7 +7198,7 @@
         {
           "lhs": "qbc_e_OH",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7203,7 +7218,7 @@
         {
           "lhs": "qbc_s_OH",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7223,7 +7238,7 @@
         {
           "lhs": "qbc_n_OH",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7243,7 +7258,7 @@
         {
           "lhs": "qbc_w_O3",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7263,7 +7278,7 @@
         {
           "lhs": "qbc_e_O3",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7283,7 +7298,7 @@
         {
           "lhs": "qbc_s_O3",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7303,7 +7318,7 @@
         {
           "lhs": "qbc_n_O3",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7323,7 +7338,7 @@
         {
           "lhs": "qbc_w_H2O2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7343,7 +7358,7 @@
         {
           "lhs": "qbc_e_H2O2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7363,7 +7378,7 @@
         {
           "lhs": "qbc_s_H2O2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7383,7 +7398,7 @@
         {
           "lhs": "qbc_n_H2O2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7403,7 +7418,7 @@
         {
           "lhs": "qbc_w_CH3O2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7423,7 +7438,7 @@
         {
           "lhs": "qbc_e_CH3O2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7443,7 +7458,7 @@
         {
           "lhs": "qbc_s_CH3O2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7463,7 +7478,7 @@
         {
           "lhs": "qbc_n_CH3O2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7483,7 +7498,7 @@
         {
           "lhs": "qbc_w_CH2O",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7503,7 +7518,7 @@
         {
           "lhs": "qbc_e_CH2O",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7523,7 +7538,7 @@
         {
           "lhs": "qbc_s_CH2O",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7543,7 +7558,7 @@
         {
           "lhs": "qbc_n_CH2O",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "ga",
               "gb"
@@ -7563,7 +7578,7 @@
         {
           "lhs": "p_pbl_top",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -7644,7 +7659,7 @@
         {
           "lhs": "pbl_f",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -7806,7 +7821,7 @@
         {
           "lhs": "pbl_wt",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -7855,7 +7870,7 @@
         {
           "lhs": "pbl_sum_NO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -7914,7 +7929,7 @@
         {
           "lhs": "pbl_sum_CO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -7973,7 +7988,7 @@
         {
           "lhs": "pbl_sum_ISOP",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -8032,7 +8047,7 @@
         {
           "lhs": "pbl_sum_HNO3",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -8091,7 +8106,7 @@
         {
           "lhs": "pbl_sum_NO2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -8150,7 +8165,7 @@
         {
           "lhs": "pbl_sum_HO2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -8209,7 +8224,7 @@
         {
           "lhs": "pbl_sum_CH3OOH",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -8268,7 +8283,7 @@
         {
           "lhs": "pbl_sum_OH",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -8327,7 +8342,7 @@
         {
           "lhs": "pbl_sum_O3",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -8386,7 +8401,7 @@
         {
           "lhs": "pbl_sum_H2O2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -8445,7 +8460,7 @@
         {
           "lhs": "pbl_sum_CH3O2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -8504,7 +8519,7 @@
         {
           "lhs": "pbl_sum_CH2O",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -8563,7 +8578,7 @@
         {
           "lhs": "pbl_mean_NO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -8616,7 +8631,7 @@
         {
           "lhs": "pbl_mean_CO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -8669,7 +8684,7 @@
         {
           "lhs": "pbl_mean_ISOP",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -8722,7 +8737,7 @@
         {
           "lhs": "pbl_mean_HNO3",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -8775,7 +8790,7 @@
         {
           "lhs": "pbl_mean_NO2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -8828,7 +8843,7 @@
         {
           "lhs": "pbl_mean_HO2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -8881,7 +8896,7 @@
         {
           "lhs": "pbl_mean_CH3OOH",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -8934,7 +8949,7 @@
         {
           "lhs": "pbl_mean_OH",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -8987,7 +9002,7 @@
         {
           "lhs": "pbl_mean_O3",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -9040,7 +9055,7 @@
         {
           "lhs": "pbl_mean_H2O2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -9093,7 +9108,7 @@
         {
           "lhs": "pbl_mean_CH3O2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -9146,7 +9161,7 @@
         {
           "lhs": "pbl_mean_CH2O",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -9645,7 +9660,7 @@
         {
           "lhs": "lonc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -9679,7 +9694,7 @@
         {
           "lhs": "latc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gj"
             ],
@@ -9713,7 +9728,7 @@
         {
           "lhs": "wlon",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "wa"
@@ -10027,7 +10042,7 @@
         {
           "lhs": "wlat",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gj",
               "wb"
@@ -10363,7 +10378,7 @@
         {
           "lhs": "wsum_lon",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -10392,7 +10407,7 @@
         {
           "lhs": "wsum_lat",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gj"
             ],
@@ -10421,7 +10436,7 @@
         {
           "lhs": "fxy_urban",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -10638,7 +10653,7 @@
         {
           "lhs": "f_urban",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -10671,7 +10686,7 @@
         {
           "lhs": "fxy_agricultural",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -10888,7 +10903,7 @@
         {
           "lhs": "f_agricultural",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -10921,7 +10936,7 @@
         {
           "lhs": "fxy_range",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -11138,7 +11153,7 @@
         {
           "lhs": "f_range",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -11171,7 +11186,7 @@
         {
           "lhs": "fxy_deciduous",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -11388,7 +11403,7 @@
         {
           "lhs": "f_deciduous",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -11421,7 +11436,7 @@
         {
           "lhs": "fxy_coniferous",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -11638,7 +11653,7 @@
         {
           "lhs": "f_coniferous",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -11671,7 +11686,7 @@
         {
           "lhs": "fxy_mixedforest",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -11888,7 +11903,7 @@
         {
           "lhs": "f_mixedforest",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -11921,7 +11936,7 @@
         {
           "lhs": "fxy_water",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -12138,7 +12153,7 @@
         {
           "lhs": "f_water",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -12171,7 +12186,7 @@
         {
           "lhs": "fxy_barren",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -12388,7 +12403,7 @@
         {
           "lhs": "f_barren",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -12421,7 +12436,7 @@
         {
           "lhs": "fxy_wetland",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -12638,7 +12653,7 @@
         {
           "lhs": "f_wetland",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -12671,7 +12686,7 @@
         {
           "lhs": "fxy_rangeag",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -12888,7 +12903,7 @@
         {
           "lhs": "f_rangeag",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -12921,7 +12936,7 @@
         {
           "lhs": "fxy_rockyshrubs",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -13138,7 +13153,7 @@
         {
           "lhs": "f_rockyshrubs",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -13218,6 +13233,20 @@
         {
           "ref": "../EarthSciDiscretizations/reprojection/lambert_conformal.esm",
           "prefix": "lcc"
+        },
+        {
+          "ref": "esm:std/calendar.esm",
+          "only": [
+            "month",
+            "is_leap_year",
+            "hour"
+          ]
+        },
+        {
+          "ref": "esm:std/interp.esm",
+          "only": [
+            "linear"
+          ]
         }
       ],
       "variables": {
@@ -14692,7 +14721,7 @@
         {
           "lhs": "src_poly",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c",
               "v",
@@ -14789,7 +14818,7 @@
         {
           "lhs": "src_coslat",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -14890,7 +14919,7 @@
         {
           "lhs": "A_full",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "j"
             ],
@@ -14960,19 +14989,20 @@
           "lhs": "A_ij",
           "rhs": {
             "op": "apply_expression_template",
-            "name": "ov.conservative_overlap_A_ij_gated",
+            "name": "ov.conservative_overlap_A_ij_gated_planar",
             "args": [],
             "bindings": {
               "src_poly": "src_poly",
               "tgt_poly": "tgt_poly",
-              "manifold": "planar"
+              "src_nv": 4,
+              "tgt_nv": 4
             }
           }
         },
         {
           "lhs": "PHI_NO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -15191,7 +15221,7 @@
         {
           "lhs": "PHI_NO_ptegu",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -15330,7 +15360,7 @@
         {
           "lhs": "Exy_NO_ptegu",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -15376,7 +15406,7 @@
         {
           "lhs": "PHI_NO_ptnonipm",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -15515,7 +15545,7 @@
         {
           "lhs": "Exy_NO_ptnonipm",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -15561,7 +15591,7 @@
         {
           "lhs": "PHI_NO_pt_oilgas",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -15700,7 +15730,7 @@
         {
           "lhs": "Exy_NO_pt_oilgas",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -15746,7 +15776,7 @@
         {
           "lhs": "PHI_NO_cmv",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -15965,7 +15995,7 @@
         {
           "lhs": "Exy_NO_cmv",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -16011,7 +16041,7 @@
         {
           "lhs": "PHI_NO2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -16230,7 +16260,7 @@
         {
           "lhs": "PHI_NO2_ptegu",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -16369,7 +16399,7 @@
         {
           "lhs": "Exy_NO2_ptegu",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -16415,7 +16445,7 @@
         {
           "lhs": "PHI_NO2_ptnonipm",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -16554,7 +16584,7 @@
         {
           "lhs": "Exy_NO2_ptnonipm",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -16600,7 +16630,7 @@
         {
           "lhs": "PHI_NO2_pt_oilgas",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -16739,7 +16769,7 @@
         {
           "lhs": "Exy_NO2_pt_oilgas",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -16785,7 +16815,7 @@
         {
           "lhs": "PHI_NO2_cmv",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -17004,7 +17034,7 @@
         {
           "lhs": "Exy_NO2_cmv",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -17050,7 +17080,7 @@
         {
           "lhs": "PHI_CO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -17269,7 +17299,7 @@
         {
           "lhs": "PHI_CO_ptegu",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -17408,7 +17438,7 @@
         {
           "lhs": "Exy_CO_ptegu",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -17454,7 +17484,7 @@
         {
           "lhs": "PHI_CO_ptnonipm",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -17593,7 +17623,7 @@
         {
           "lhs": "Exy_CO_ptnonipm",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -17639,7 +17669,7 @@
         {
           "lhs": "PHI_CO_pt_oilgas",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -17778,7 +17808,7 @@
         {
           "lhs": "Exy_CO_pt_oilgas",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -17824,7 +17854,7 @@
         {
           "lhs": "PHI_CO_cmv",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -18043,7 +18073,7 @@
         {
           "lhs": "Exy_CO_cmv",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -18089,7 +18119,7 @@
         {
           "lhs": "PHI_ISOP",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -18308,7 +18338,7 @@
         {
           "lhs": "PHI_ISOP_ptegu",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -18447,7 +18477,7 @@
         {
           "lhs": "Exy_ISOP_ptegu",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -18493,7 +18523,7 @@
         {
           "lhs": "PHI_ISOP_ptnonipm",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -18632,7 +18662,7 @@
         {
           "lhs": "Exy_ISOP_ptnonipm",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -18678,7 +18708,7 @@
         {
           "lhs": "PHI_ISOP_pt_oilgas",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -18817,7 +18847,7 @@
         {
           "lhs": "Exy_ISOP_pt_oilgas",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -18863,7 +18893,7 @@
         {
           "lhs": "PHI_ISOP_cmv",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -19082,7 +19112,7 @@
         {
           "lhs": "Exy_ISOP_cmv",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -19128,7 +19158,7 @@
         {
           "lhs": "PHI_FORM",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -19347,7 +19377,7 @@
         {
           "lhs": "PHI_FORM_ptegu",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -19486,7 +19516,7 @@
         {
           "lhs": "Exy_FORM_ptegu",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -19532,7 +19562,7 @@
         {
           "lhs": "PHI_FORM_ptnonipm",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -19671,7 +19701,7 @@
         {
           "lhs": "Exy_FORM_ptnonipm",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -19717,7 +19747,7 @@
         {
           "lhs": "PHI_FORM_pt_oilgas",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -19856,7 +19886,7 @@
         {
           "lhs": "Exy_FORM_pt_oilgas",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -19902,7 +19932,7 @@
         {
           "lhs": "PHI_FORM_cmv",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "c"
             ],
@@ -20121,7 +20151,7 @@
         {
           "lhs": "Exy_FORM_cmv",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -20177,21 +20207,23 @@
         {
           "lhs": "month_utc",
           "rhs": {
-            "op": "fn",
-            "name": "datetime.month",
-            "args": [
-              "t_utc"
-            ]
+            "op": "apply_expression_template",
+            "args": [],
+            "name": "month",
+            "bindings": {
+              "t": "t_utc"
+            }
           }
         },
         {
           "lhs": "is_leap_year_utc",
           "rhs": {
-            "op": "fn",
-            "name": "datetime.is_leap_year",
-            "args": [
-              "t_utc"
-            ]
+            "op": "apply_expression_template",
+            "args": [],
+            "name": "is_leap_year",
+            "bindings": {
+              "t": "t_utc"
+            }
           }
         },
         {
@@ -20200,10 +20232,11 @@
             "op": "+",
             "args": [
               {
-                "op": "fn",
-                "name": "interp.linear",
-                "args": [
-                  {
+                "op": "apply_expression_template",
+                "args": [],
+                "name": "linear",
+                "bindings": {
+                  "table": {
                     "op": "const",
                     "args": [],
                     "value": [
@@ -20221,7 +20254,7 @@
                       31
                     ]
                   },
-                  {
+                  "axis": {
                     "op": "const",
                     "args": [],
                     "value": [
@@ -20239,18 +20272,20 @@
                       12
                     ]
                   },
-                  "month_utc"
-                ]
+                  "x": "month_utc",
+                  "n": 12
+                }
               },
               {
                 "op": "*",
                 "args": [
                   "is_leap_year_utc",
                   {
-                    "op": "fn",
-                    "name": "interp.linear",
-                    "args": [
-                      {
+                    "op": "apply_expression_template",
+                    "args": [],
+                    "name": "linear",
+                    "bindings": {
+                      "table": {
                         "op": "const",
                         "args": [],
                         "value": [
@@ -20268,7 +20303,7 @@
                           0
                         ]
                       },
-                      {
+                      "axis": {
                         "op": "const",
                         "args": [],
                         "value": [
@@ -20286,8 +20321,9 @@
                           12
                         ]
                       },
-                      "month_utc"
-                    ]
+                      "x": "month_utc",
+                      "n": 12
+                    }
                   }
                 ]
               }
@@ -20297,7 +20333,7 @@
         {
           "lhs": "lonc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -20331,7 +20367,7 @@
         {
           "lhs": "tz_offset_h",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -20366,7 +20402,7 @@
         {
           "lhs": "t_local_utc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -20403,7 +20439,7 @@
         {
           "lhs": "local_hour",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -20419,17 +20455,18 @@
               "op": "+",
               "args": [
                 {
-                  "op": "fn",
-                  "name": "datetime.hour",
-                  "args": [
-                    {
+                  "op": "apply_expression_template",
+                  "args": [],
+                  "name": "hour",
+                  "bindings": {
+                    "t": {
                       "op": "index",
                       "args": [
                         "t_local_utc",
                         "gi"
                       ]
                     }
-                  ]
+                  }
                 },
                 1.0
               ]
@@ -20439,7 +20476,7 @@
         {
           "lhs": "day_of_week",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -20527,7 +20564,7 @@
         {
           "lhs": "tz_offset_round_h",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -20646,7 +20683,7 @@
         {
           "lhs": "t_local_round_utc",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -20683,7 +20720,7 @@
         {
           "lhs": "local_hour_round",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -20699,17 +20736,18 @@
               "op": "+",
               "args": [
                 {
-                  "op": "fn",
-                  "name": "datetime.hour",
-                  "args": [
-                    {
+                  "op": "apply_expression_template",
+                  "args": [],
+                  "name": "hour",
+                  "bindings": {
+                    "t": {
                       "op": "index",
                       "args": [
                         "t_local_round_utc",
                         "gi"
                       ]
                     }
-                  ]
+                  }
                 },
                 1.0
               ]
@@ -20719,7 +20757,7 @@
         {
           "lhs": "day_of_week_round",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -20807,7 +20845,7 @@
         {
           "lhs": "diurnal_factor",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -20820,10 +20858,11 @@
               "local_hour"
             ],
             "expr": {
-              "op": "fn",
-              "name": "interp.linear",
-              "args": [
-                {
+              "op": "apply_expression_template",
+              "args": [],
+              "name": "linear",
+              "bindings": {
+                "table": {
                   "op": "const",
                   "args": [],
                   "value": [
@@ -20853,7 +20892,7 @@
                     0.45
                   ]
                 },
-                {
+                "axis": {
                   "op": "const",
                   "args": [],
                   "value": [
@@ -20883,21 +20922,22 @@
                     24
                   ]
                 },
-                {
+                "x": {
                   "op": "index",
                   "args": [
                     "local_hour",
                     "gi"
                   ]
-                }
-              ]
+                },
+                "n": 24
+              }
             }
           }
         },
         {
           "lhs": "diurnal_factor_nox",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -20910,10 +20950,11 @@
               "local_hour_round"
             ],
             "expr": {
-              "op": "fn",
-              "name": "interp.linear",
-              "args": [
-                {
+              "op": "apply_expression_template",
+              "args": [],
+              "name": "linear",
+              "bindings": {
+                "table": {
                   "op": "const",
                   "args": [],
                   "value": [
@@ -20943,7 +20984,7 @@
                     0.5741503
                   ]
                 },
-                {
+                "axis": {
                   "op": "const",
                   "args": [],
                   "value": [
@@ -20973,21 +21014,22 @@
                     24
                   ]
                 },
-                {
+                "x": {
                   "op": "index",
                   "args": [
                     "local_hour_round",
                     "gi"
                   ]
-                }
-              ]
+                },
+                "n": 24
+              }
             }
           }
         },
         {
           "lhs": "diurnal_factor_isop",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -21000,10 +21042,11 @@
               "local_hour_round"
             ],
             "expr": {
-              "op": "fn",
-              "name": "interp.linear",
-              "args": [
-                {
+              "op": "apply_expression_template",
+              "args": [],
+              "name": "linear",
+              "bindings": {
+                "table": {
                   "op": "const",
                   "args": [],
                   "value": [
@@ -21033,7 +21076,7 @@
                     0
                   ]
                 },
-                {
+                "axis": {
                   "op": "const",
                   "args": [],
                   "value": [
@@ -21063,21 +21106,22 @@
                     24
                   ]
                 },
-                {
+                "x": {
                   "op": "index",
                   "args": [
                     "local_hour_round",
                     "gi"
                   ]
-                }
-              ]
+                },
+                "n": 24
+              }
             }
           }
         },
         {
           "lhs": "dayofweek_nox",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -21090,10 +21134,11 @@
               "day_of_week_round"
             ],
             "expr": {
-              "op": "fn",
-              "name": "interp.linear",
-              "args": [
-                {
+              "op": "apply_expression_template",
+              "args": [],
+              "name": "linear",
+              "bindings": {
+                "table": {
                   "op": "const",
                   "args": [],
                   "value": [
@@ -21106,7 +21151,7 @@
                     0.784
                   ]
                 },
-                {
+                "axis": {
                   "op": "const",
                   "args": [],
                   "value": [
@@ -21119,21 +21164,22 @@
                     7
                   ]
                 },
-                {
+                "x": {
                   "op": "index",
                   "args": [
                     "day_of_week_round",
                     "gi"
                   ]
-                }
-              ]
+                },
+                "n": 7
+              }
             }
           }
         },
         {
           "lhs": "dayofweek_co",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi"
             ],
@@ -21146,10 +21192,11 @@
               "day_of_week"
             ],
             "expr": {
-              "op": "fn",
-              "name": "interp.linear",
-              "args": [
-                {
+              "op": "apply_expression_template",
+              "args": [],
+              "name": "linear",
+              "bindings": {
+                "table": {
                   "op": "const",
                   "args": [],
                   "value": [
@@ -21162,7 +21209,7 @@
                     0.683
                   ]
                 },
-                {
+                "axis": {
                   "op": "const",
                   "args": [],
                   "value": [
@@ -21175,21 +21222,22 @@
                     7
                   ]
                 },
-                {
+                "x": {
                   "op": "index",
                   "args": [
                     "day_of_week",
                     "gi"
                   ]
-                }
-              ]
+                },
+                "n": 7
+              }
             }
           }
         },
         {
           "lhs": "Exy_NO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -21235,7 +21283,7 @@
         {
           "lhs": "Exy_NO2",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -21281,7 +21329,7 @@
         {
           "lhs": "Exy_CO",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -21327,7 +21375,7 @@
         {
           "lhs": "Exy_ISOP",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -21373,7 +21421,7 @@
         {
           "lhs": "Exy_FORM",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj"
@@ -21419,7 +21467,7 @@
         {
           "lhs": "NO_emis",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -21624,7 +21672,7 @@
         {
           "lhs": "NO2_emis",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -21829,7 +21877,7 @@
         {
           "lhs": "CO_emis",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -22034,7 +22082,7 @@
         {
           "lhs": "ISOP_emis",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -22231,7 +22279,7 @@
         {
           "lhs": "CH2O_emis",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -22428,7 +22476,7 @@
         {
           "lhs": "frac_ptegu",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -22474,10 +22522,11 @@
                       ]
                     },
                     {
-                      "op": "fn",
-                      "name": "interp.linear",
-                      "args": [
-                        {
+                      "op": "apply_expression_template",
+                      "args": [],
+                      "name": "linear",
+                      "bindings": {
+                        "table": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22494,7 +22543,7 @@
                             0.008970489340082866
                           ]
                         },
-                        {
+                        "axis": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22511,14 +22560,16 @@
                             11.0
                           ]
                         },
-                        "gk"
-                      ]
+                        "x": "gk",
+                        "n": 11
+                      }
                     },
                     {
-                      "op": "fn",
-                      "name": "interp.linear",
-                      "args": [
-                        {
+                      "op": "apply_expression_template",
+                      "args": [],
+                      "name": "linear",
+                      "bindings": {
+                        "table": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22535,7 +22586,7 @@
                             0.008970489340082866
                           ]
                         },
-                        {
+                        "axis": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22552,8 +22603,9 @@
                             11.0
                           ]
                         },
-                        "gk"
-                      ]
+                        "x": "gk",
+                        "n": 11
+                      }
                     }
                   ]
                 }
@@ -22564,7 +22616,7 @@
         {
           "lhs": "frac_ptnonipm",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -22610,10 +22662,11 @@
                       ]
                     },
                     {
-                      "op": "fn",
-                      "name": "interp.linear",
-                      "args": [
-                        {
+                      "op": "apply_expression_template",
+                      "args": [],
+                      "name": "linear",
+                      "bindings": {
+                        "table": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22630,7 +22683,7 @@
                             0.00062392992935873
                           ]
                         },
-                        {
+                        "axis": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22647,14 +22700,16 @@
                             11.0
                           ]
                         },
-                        "gk"
-                      ]
+                        "x": "gk",
+                        "n": 11
+                      }
                     },
                     {
-                      "op": "fn",
-                      "name": "interp.linear",
-                      "args": [
-                        {
+                      "op": "apply_expression_template",
+                      "args": [],
+                      "name": "linear",
+                      "bindings": {
+                        "table": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22671,7 +22726,7 @@
                             0.00062392992935873
                           ]
                         },
-                        {
+                        "axis": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22688,8 +22743,9 @@
                             11.0
                           ]
                         },
-                        "gk"
-                      ]
+                        "x": "gk",
+                        "n": 11
+                      }
                     }
                   ]
                 }
@@ -22700,7 +22756,7 @@
         {
           "lhs": "frac_pt_oilgas",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -22746,10 +22802,11 @@
                       ]
                     },
                     {
-                      "op": "fn",
-                      "name": "interp.linear",
-                      "args": [
-                        {
+                      "op": "apply_expression_template",
+                      "args": [],
+                      "name": "linear",
+                      "bindings": {
+                        "table": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22766,7 +22823,7 @@
                             6.486507306173943e-05
                           ]
                         },
-                        {
+                        "axis": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22783,14 +22840,16 @@
                             11.0
                           ]
                         },
-                        "gk"
-                      ]
+                        "x": "gk",
+                        "n": 11
+                      }
                     },
                     {
-                      "op": "fn",
-                      "name": "interp.linear",
-                      "args": [
-                        {
+                      "op": "apply_expression_template",
+                      "args": [],
+                      "name": "linear",
+                      "bindings": {
+                        "table": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22807,7 +22866,7 @@
                             6.486507306173943e-05
                           ]
                         },
-                        {
+                        "axis": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22824,8 +22883,9 @@
                             11.0
                           ]
                         },
-                        "gk"
-                      ]
+                        "x": "gk",
+                        "n": 11
+                      }
                     }
                   ]
                 }
@@ -22836,7 +22896,7 @@
         {
           "lhs": "frac_cmv",
           "rhs": {
-            "op": "aggregate",
+            "op": "faq",
             "output_idx": [
               "gi",
               "gj",
@@ -22882,10 +22942,11 @@
                       ]
                     },
                     {
-                      "op": "fn",
-                      "name": "interp.linear",
-                      "args": [
-                        {
+                      "op": "apply_expression_template",
+                      "args": [],
+                      "name": "linear",
+                      "bindings": {
+                        "table": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22894,7 +22955,7 @@
                             0.123478182
                           ]
                         },
-                        {
+                        "axis": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22903,14 +22964,16 @@
                             3.0
                           ]
                         },
-                        "gk"
-                      ]
+                        "x": "gk",
+                        "n": 3
+                      }
                     },
                     {
-                      "op": "fn",
-                      "name": "interp.linear",
-                      "args": [
-                        {
+                      "op": "apply_expression_template",
+                      "args": [],
+                      "name": "linear",
+                      "bindings": {
+                        "table": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22919,7 +22982,7 @@
                             0.123478182
                           ]
                         },
-                        {
+                        "axis": {
                           "op": "const",
                           "args": [],
                           "value": [
@@ -22928,8 +22991,9 @@
                             3.0
                           ]
                         },
-                        "gk"
-                      ]
+                        "x": "gk",
+                        "n": 3
+                      }
                     }
                   ]
                 }

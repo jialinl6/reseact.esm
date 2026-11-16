@@ -1,6 +1,6 @@
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.12.6"
+julia_version = "1.12.7"
 manifest_format = "2.0"
 project_hash = "3541b5a9171ca298d0c5b8e0ad084d3e0bcc2953"
 
@@ -256,7 +256,7 @@ weakdeps = ["Dates", "LinearAlgebra"]
 [[deps.CompilerSupportLibraries_jll]]
 deps = ["Artifacts", "Libdl"]
 uuid = "e66e0078-7015-5450-92f7-15fbd957f2ae"
-version = "1.3.0+1"
+version = "1.3.1+2"
 
 [[deps.CompositionsBase]]
 git-tree-sha1 = "802bb88cd69dfd1509f6670416bd4434015693ad"
@@ -459,10 +459,13 @@ uuid = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
 version = "1.7.0"
 
 [[deps.EarthSciAST]]
-deps = ["Dates", "JSON3", "JSONSchema", "LinearAlgebra", "OrderedCollections", "Printf", "RuntimeGeneratedFunctions", "Tullio", "Unitful"]
-path = "/projects/illinois/eng/cee/ctessum/ctessum/code/EarthSciAST/pkg/EarthSciAST.jl"
+deps = ["Dates", "JSON3", "JSONSchema", "LinearAlgebra", "OrderedCollections", "Polyester", "PrecompileTools", "Printf", "RuntimeGeneratedFunctions", "SHA", "Serialization", "Tullio", "Unitful"]
+git-tree-sha1 = "e34971609e923f8637dfe8bab2bfeecb54db6581"
+repo-rev = "24f13caac7081b7d04513f0fe43aa0ac578e3d42"
+repo-subdir = "pkg/EarthSciAST.jl"
+repo-url = "https://github.com/EarthSciML/EarthSciAST.git"
 uuid = "c7bf5e87-b31b-4281-bdce-ffb8a46ec87c"
-version = "0.1.1"
+version = "0.12.1"
 
     [deps.EarthSciAST.extensions]
     EarthSciASTCatalystExt = ["Catalyst", "ModelingToolkit", "Symbolics"]
@@ -471,11 +474,10 @@ version = "0.1.1"
     EarthSciASTDataRefreshExt = ["DiffEqCallbacks", "SciMLBase"]
     EarthSciASTEarthSciIOExt = "EarthSciIO"
     EarthSciASTForwardDiffExt = "ForwardDiff"
-    EarthSciASTGeometryOpsExt = ["GeometryOps", "GeoInterface", "SortTileRecursiveTree", "Extents"]
     EarthSciASTMTKExt = ["DomainSets", "ModelingToolkit", "Symbolics"]
-    EarthSciASTPolyesterExt = "Polyester"
     EarthSciASTReactantExt = "Reactant"
     EarthSciASTSimulateExt = "SciMLBase"
+    EarthSciASTSolverWorkloadExt = ["OrdinaryDiffEqTsit5", "SciMLBase"]
 
     [deps.EarthSciAST.weakdeps]
     Catalyst = "479239e8-5488-4da2-87a7-35f2df7eef83"
@@ -483,30 +485,28 @@ version = "0.1.1"
     DiffEqCallbacks = "459566f4-90b8-5000-8ac3-15dfb0a30def"
     DomainSets = "5b8099bc-c8ec-5219-889f-1d9e522a28bf"
     EarthSciIO = "180e2c70-dda6-501b-9997-3c819c50e0c3"
-    Extents = "411431e0-e8b7-467b-b5e0-f676ba4f2910"
     ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
-    GeoInterface = "cf35fbd7-0cd7-5166-be24-54bfbe79505f"
-    GeometryOps = "3251bfac-6a57-4b6d-aa61-ac1fef2975ab"
     ModelingToolkit = "961ee093-0014-501f-94e3-6117800e7a78"
-    Polyester = "f517fe37-dbe3-4b94-8317-1923a5111588"
+    ModelingToolkitBase = "7771a370-6774-4173-bd38-47e70ca0b839"
+    OrdinaryDiffEqTsit5 = "b1df2697-797e-41e3-8120-5422d3b24e4a"
     Reactant = "3c362404-f566-11ee-1572-e11a4b42c853"
     SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
-    SortTileRecursiveTree = "746ee33f-1797-42c2-866d-db2fce69d14d"
     Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
 
 [[deps.EarthSciASTDiff]]
 deps = ["EarthSciAST", "JSON3", "OrderedCollections", "SparseArrays"]
-path = "/projects/illinois/eng/cee/ctessum/ctessum/code/EarthSciASTDiff/pkg/EarthSciASTDiff.jl"
+git-tree-sha1 = "a76e134c58e7575a3b5a9502a3a4d76d4a670f2c"
+repo-rev = "9891c3005a31b74a0547498d0d2981ebb69cdc14"
+repo-subdir = "pkg/EarthSciASTDiff.jl"
+repo-url = "https://github.com/EarthSciML/EarthSciASTDiff.git"
 uuid = "8f0c9a34-6c1e-4f7b-9d2a-3e5b7c1d9f42"
-version = "0.1.0"
-weakdeps = ["SciMLBase"]
-
-    [deps.EarthSciASTDiff.extensions]
-    EarthSciASTDiffSciMLBaseExt = "SciMLBase"
+version = "0.6.1"
 
 [[deps.EarthSciASTSplitter]]
 deps = ["EarthSciAST"]
-path = "/projects/illinois/eng/cee/ctessum/ctessum/code/EarthSciASTSplitter.jl"
+git-tree-sha1 = "28e084d2977365ed32677430733cc360fc470982"
+repo-rev = "sync/upstream-2026-11"
+repo-url = "https://github.com/jialinl6/EarthSciASTSplitter.jl.git"
 uuid = "9db91454-864a-4b1e-81d2-80df174b7aae"
 version = "0.1.0"
 weakdeps = ["OrdinaryDiffEqOperatorSplitting", "SciMLBase"]
@@ -517,12 +517,16 @@ weakdeps = ["OrdinaryDiffEqOperatorSplitting", "SciMLBase"]
 
 [[deps.EarthSciIO]]
 deps = ["CRC32c", "Dates", "Downloads", "FileWatching", "JSON", "NCDatasets", "SHA", "UUIDs", "ZipFile"]
-path = "/projects/illinois/eng/cee/ctessum/ctessum/code/EarthSciIO/julia"
+git-tree-sha1 = "1af6bca7e9de1592471ab4cba201fe1d27bab0f7"
+repo-rev = "770dbc22d557e6e2ae87d9bccd7386f45764e9d0"
+repo-subdir = "julia"
+repo-url = "https://github.com/EarthSciML/EarthSciIO.git"
 uuid = "180e2c70-dda6-501b-9997-3c819c50e0c3"
-version = "0.1.2"
+version = "0.4.0"
 
     [deps.EarthSciIO.extensions]
     EarthSciIOBloscExt = "Blosc"
+    EarthSciIOParquet2Ext = "Parquet2"
     EarthSciIOShapefileExt = "Shapefile"
     EarthSciIOTiffImagesExt = "TiffImages"
     EarthSciIOZstdExt = "CodecZstd"
@@ -530,6 +534,7 @@ version = "0.1.2"
     [deps.EarthSciIO.weakdeps]
     Blosc = "a74b3585-a348-5f62-a45c-50e91977d574"
     CodecZstd = "6b39b394-51ab-5f42-8807-6242bab2b4c2"
+    Parquet2 = "98572fba-bba0-415d-956f-fa77e587d26d"
     Shapefile = "8e980c4a-a4fe-5da2-b3a7-4b4b0353a2f4"
     TiffImages = "731e570b-9d59-4bfa-96dc-6df516fadf69"
 
@@ -1294,7 +1299,7 @@ version = "5.0.11+0"
 [[deps.OpenSSL_jll]]
 deps = ["Artifacts", "Libdl"]
 uuid = "458c3c95-2e84-50aa-8efc-19380b2a3a95"
-version = "3.5.4+0"
+version = "3.5.6+0"
 
 [[deps.OpenSpecFun_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "Libdl"]

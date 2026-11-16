@@ -25,3 +25,9 @@ Reactant = "3c362404-f566-11ee-1572-e11a4b42c853"
 RuntimeGeneratedFunctions = "7e49a35a-f44a-4d26-94aa-eba1b4ca6b47"
 SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[sources]
+EarthSciAST = {url = "https://github.com/EarthSciML/EarthSciAST.git", rev = "24f13caac7081b7d04513f0fe43aa0ac578e3d42", subdir = "pkg/EarthSciAST.jl"}
+EarthSciASTDiff = {url = "https://github.com/EarthSciML/EarthSciASTDiff.git", rev = "9891c3005a31b74a0547498d0d2981ebb69cdc14", subdir = "pkg/EarthSciASTDiff.jl"}
+EarthSciASTSplitter = {url = "https://github.com/jialinl6/EarthSciASTSplitter.jl.git", rev = "sync/upstream-2026-11"}
+EarthSciIO = {url = "https://github.com/EarthSciML/EarthSciIO.git", rev = "770dbc22d557e6e2ae87d9bccd7386f45764e9d0", subdir = "julia"}

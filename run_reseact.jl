@@ -80,7 +80,7 @@
 #                      evaluates its time-dependent inputs -- once at the macro step's
 #                      midpoint, as GEOS-Chem over its chemistry step, or at each stage
 #                      time, the exact reference (see where `fc` is built)
-#   RESEACT_TRANSPORT_FORCING_TIME  "stage" (default) or "midstep": the same choice for
+#   RESEACT_TRANSPORT_FORCING_TIME  "midstep" (default) or "stage": the same choice for
 #                      the transport's time-dependent inputs (see `f_trans_run!`)
 #   RESEACT_CACHE_DIR  setup cache directory          (default: none = off). Keeps the
 #                      prepared model and the band program's static parts between runs,
@@ -370,15 +370,18 @@ const FORCING_TIME = get(ENV, "RESEACT_FORCING_TIME", "midstep")
 FORCING_TIME in ("stage", "midstep") ||
     error("RESEACT_FORCING_TIME must be stage or midstep, got $FORCING_TIME")
 # THE TRANSPORT'S TIME-DEPENDENT INPUTS -- the GEOS-FP fields it blends in time between
-# records, the winds and the surface pressure among them -- under the same two modes. "stage" (the default for now) reads them at every SSPRK43 stage time, as
-# before. "midstep" reads them once per macro step, at its midpoint (TFORCE, as the
-# chemistry's), for every transport RHS call in it; GEOS-Chem likewise holds its A3
-# winds constant over each 3-h interval. Measured on the cluster (CONUS, 1 day, native,
-# against stage): time loop 4x5 8 threads 84.0 -> 71.0 s (-15 %), 2x2.5 8 threads
-# 317.1 -> 256.6 s (-19 %), 4x5 32 threads with the other changes on 53.2 -> 49.3 s;
-# relative differences O3 mean 1.1e-6, O3 min 2.5e-4, O3 max 2.9e-5, OH max 6.4e-4,
-# NO2 mean 1.5e-5, minimum air mass 2.6e-15, and the continuity diagnostic unchanged.
-const TRANSPORT_FORCING_TIME = get(ENV, "RESEACT_TRANSPORT_FORCING_TIME", "stage")
+# records, the winds and the surface pressure among them -- under the same two modes.
+# "midstep" (the default) reads them once per macro step, at its midpoint (TFORCE, as
+# the chemistry's), for every transport RHS call in it; GEOS-Chem likewise holds its A3
+# winds constant over each 3-h interval. "stage" reads them at every SSPRK43 stage
+# time: the exact reference, and the default until 2026-11-14. Measured on the cluster
+# (CONUS, 1 day, native, against stage): the transport takes one step per 5-min macro
+# step (4x5 379 -> 288 steps, 2x2.5 411 -> 288) and the chemistry step counts do not
+# change; time loop 4x5 8 threads 79.3 (stage, mean of 4 runs) -> 66.9 s (-16 %),
+# 2x2.5 8 threads 292.4 -> 234.6 s (-20 %); relative differences O3 mean 1.1e-6, O3
+# min 2.5e-4, O3 max 2.9e-5, OH max 6.4e-4, NO2 mean 1.5e-5, minimum air mass 2.6e-15,
+# and the continuity diagnostic unchanged.
+const TRANSPORT_FORCING_TIME = get(ENV, "RESEACT_TRANSPORT_FORCING_TIME", "midstep")
 TRANSPORT_FORCING_TIME in ("stage", "midstep") ||
     error("RESEACT_TRANSPORT_FORCING_TIME must be stage or midstep, got $TRANSPORT_FORCING_TIME")
 const ANY_MIDSTEP = FORCING_TIME == "midstep" || TRANSPORT_FORCING_TIME == "midstep"

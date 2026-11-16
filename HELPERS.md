@@ -142,8 +142,10 @@ RESEACT_SOLVE_SECS=600`): the last digest row, t = 18.17 h (O3_min O3_mean O3_ma
 OH_max NO2_mean | rms_int), then the `RESULT` line's step counts, should read
 
 ```text
-midstep (default): 39.72163 39.96087 39.99911 2.537e-04 8.023e-03 | 1.91e-03, nT=3 nC=78 nbisect=0
-stage:             39.72160 39.96088 39.99911 2.543e-04 8.023e-03 | 1.91e-03, nT=3 nC=102 nbisect=0
+default (chemistry and transport midstep):
+  39.72163 39.96087 39.99911 2.537e-04 8.023e-03 | 1.91e-03, nT=3 nC=78 nbisect=0
+stage (RESEACT_FORCING_TIME=stage RESEACT_TRANSPORT_FORCING_TIME=stage):
+  39.72160 39.96088 39.99911 2.543e-04 8.023e-03 | 1.91e-03, nT=3 nC=102 nbisect=0
 ```
 
 How each runner carries the midpoint:
@@ -163,18 +165,26 @@ How each runner carries the midpoint:
 
 **Transport forcing time — `RESEACT_TRANSPORT_FORCING_TIME=stage|midstep`.** The same
 choice for the transport's time-dependent inputs, the GEOS-FP fields it blends in time
-between records (the winds and the surface pressure among them). `stage` is the default
-for now and is the behaviour before the switch existed. `midstep` reads them once per
-macro step, at its midpoint, for every transport RHS call in it, as GEOS-Chem holds its
-A3 winds constant over each 3-h interval. It is independent of `RESEACT_FORCING_TIME`,
-and when both are `midstep` the two halves read the same midpoint. Every runner prints
-which mode it runs, and any other value is an error.
+between records (the winds and the surface pressure among them). `midstep` (the default
+since 2026-11-14) reads them once per macro step, at its midpoint, for every transport
+RHS call in it, as GEOS-Chem holds its A3 winds constant over each 3-h interval.
+`stage` reads them at every stage time: the exact reference, and the behaviour before
+the switch existed. It is independent of `RESEACT_FORCING_TIME`, and when both are
+`midstep` the two halves read the same midpoint. Every runner prints which mode it
+runs, and any other value is an error.
 
-Measured on the cluster (CONUS, 1 day, native, against `stage`): time loop 4x5 8 threads
-84.0 → 71.0 s (−15 %), 2x2.5 8 threads 317.1 → 256.6 s (−19 %), 4x5 32 threads with the
-other changes on 53.2 → 49.3 s. Relative differences: O3 mean 1.1e-6, O3 min 2.5e-4,
-O3 max 2.9e-5, OH max 6.4e-4, NO2 mean 1.5e-5, minimum air mass 2.6e-15; the continuity
-diagnostic is unchanged.
+Measured on the cluster (CONUS, 1 day, native, against `stage`): the transport takes
+one step per 5-min macro step (4x5 379 → 288 steps, 2x2.5 411 → 288), and the
+chemistry step counts do not change. Time loop 4x5 8 threads 79.3 s (`stage`, mean of
+4 runs) → 66.9 s (−16 %), 2x2.5 8 threads 292.4 → 234.6 s (−20 %). Relative
+differences: O3 mean 1.1e-6, O3 min 2.5e-4, O3 max 2.9e-5, OH max 6.4e-4, NO2 mean
+1.5e-5, minimum air mass 2.6e-15; the continuity diagnostic is unchanged. The compiled
+runner matches the native one to 2.0e-9 on O3 min and 1.0e-5 on OH max, the same
+difference as at `stage`. In the adjoint the demo's identity holds to 3.4e-16 relative
+and every finite-difference check to 7.7e-10; CONUS 24 h on 8 shards passes the
+identity, forward 139.1 → 129.6 s, backward 359.3 → 352.6 s. The 7×7×8 smoke row
+with both switches at `midstep` is the default row above, unchanged at the printed
+precision.
 
 * `run_reseact.jl` — the transport RHS handed to `lie_trotter_solve_bisect` reads
   `TFORCE`, also for both halves of a bisected step. The refusal of a GEOS-FP refresh
@@ -184,8 +194,10 @@ diagnostic is unchanged.
 * `tools/adjoint_gradient.jl` — `tf` in the transport theta (`trans_theta`), the
   checkpointed `Ckpt.tf` of each macro step, as the chemistry's, for the forward step,
   every replay, VJP, JVP, fd replay and the frozen device loop. `RESEACT_SUBCYCLE` /
-  `RESEACT_BUCKET` follow the chemistry switch's rules (an explicit `midstep` is refused),
-  and so does `tools/sensitivity_forward.jl`.
+  `RESEACT_BUCKET` follow the chemistry switch's rules: with
+  `RESEACT_TRANSPORT_FORCING_TIME` unset they run `stage` and print a note, and an
+  explicit `midstep` is refused. `tools/sensitivity_forward.jl` does the same, and its
+  note names whichever of the two switches is unset.
 
 ### `run_reseact.jl` (native in-place) — the above **plus** `op_split.jl`.
 

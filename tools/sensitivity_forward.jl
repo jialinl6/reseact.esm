@@ -146,8 +146,11 @@ const SENSCSV   = get(ENV, "RESEACT_SENS_CSV", "")
 # the macro-step midpoint; run_reseact_reactant.jl shows how). With the switch unset
 # it runs stage and says so; an explicit midstep is refused, rather than
 # differentiate a different map from the one the adjoint arm or the runners
-# integrate under the same environment.
-const FORCING_UNSET = !haskey(ENV, "RESEACT_FORCING_TIME")
+# integrate under the same environment. RESEACT_TRANSPORT_FORCING_TIME (midstep is
+# the runners' default there too) gets the same rule, and the note names whichever of
+# the two is unset.
+const FORCING_UNSET = [k for k in ("RESEACT_FORCING_TIME", "RESEACT_TRANSPORT_FORCING_TIME")
+                       if !haskey(ENV, k)]
 let ft = get(ENV, "RESEACT_FORCING_TIME", "stage")
     ft in ("stage", "midstep") ||
         error("RESEACT_FORCING_TIME must be stage or midstep, got $ft")
@@ -155,7 +158,7 @@ let ft = get(ENV, "RESEACT_FORCING_TIME", "stage")
         error("tools/sensitivity_forward.jl supports RESEACT_FORCING_TIME=stage only " *
               "(got $ft); run the adjoint arm (RESEACT_DEMO=adjoint) for midstep")
 end
-# The same for the transport's inputs (RESEACT_TRANSPORT_FORCING_TIME, stage by default).
+# The same for the transport's inputs (RESEACT_TRANSPORT_FORCING_TIME).
 let ft = get(ENV, "RESEACT_TRANSPORT_FORCING_TIME", "stage")
     ft in ("stage", "midstep") ||
         error("RESEACT_TRANSPORT_FORCING_TIME must be stage or midstep, got $ft")
@@ -187,9 +190,10 @@ say("=== $LABEL : FORWARD parameter sensitivity ($(basename(MODEL))) " *
     "grid=$(GRID_MP["NLON"])x$(GRID_MP["NLAT"])x$NLEV_EFF T0=$(round(Int,T0)) " *
     "nmacro=$NMACRO macro_dt=$(round(Int,MACRO_DT)) ===")
 say("    d[$OBJSPEC]/d[$(join(PARAMS, ", "))] at t=$(round(Int,T_END)) s")
-FORCING_UNSET &&
-    say("    NOTE this arm is not wired for midstep, so with RESEACT_FORCING_TIME unset it " *
-        "uses stage (set it to stage everywhere to compare with the adjoint arm)")
+isempty(FORCING_UNSET) ||
+    say("    NOTE this arm is not wired for midstep, so with $(join(FORCING_UNSET, " and ")) " *
+        "unset it uses stage (set $(length(FORCING_UNSET) == 1 ? "it" : "them") to stage " *
+        "everywhere to compare with the adjoint arm)")
 
 # --------------------------------------------------------------------------- #
 # 1. Build -- identical to run_reseact_reactant.jl.

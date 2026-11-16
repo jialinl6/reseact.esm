@@ -256,8 +256,8 @@ matter: `RESEACT_RES` (GEOS-FP resolution), `RESEACT_NLON/NLAT/NLEV` and
 `RESEACT_ADJ_CSV` (gradient output), `RESEACT_FORCING_TIME` (`midstep`, the default:
 the chemistry's time-dependent inputs at the macro-step midpoint, as GEOS-Chem over
 its chemistry step; or `stage`, at every stage time, the exact reference; all three
-runners take it, see `HELPERS.md`), `RESEACT_TRANSPORT_FORCING_TIME` (`stage`, the
-default, or `midstep`: the same choice for the transport's inputs, see `HELPERS.md`). The runner prints a **provenance block** at
+runners take it, see `HELPERS.md`), `RESEACT_TRANSPORT_FORCING_TIME` (`midstep`, the
+default, or `stage`: the same choice for the transport's inputs, see `HELPERS.md`). The runner prints a **provenance block** at
 start — the git HEAD and dirty state of this repo and of every developed sibling — so
 a logged result can be tied to commits.
 
@@ -270,8 +270,10 @@ the last digest row, t = 18.17 h (O3_min O3_mean O3_max OH_max NO2_mean | rms_in
 the `RESULT` line's step counts, should read
 
 ```text
-midstep (default): 39.72163 39.96087 39.99911 2.537e-04 8.023e-03 | 1.91e-03, nT=3 nC=78 nbisect=0
-stage:             39.72160 39.96088 39.99911 2.543e-04 8.023e-03 | 1.91e-03, nT=3 nC=102 nbisect=0
+default (chemistry and transport midstep):
+  39.72163 39.96087 39.99911 2.537e-04 8.023e-03 | 1.91e-03, nT=3 nC=78 nbisect=0
+stage (RESEACT_FORCING_TIME=stage RESEACT_TRANSPORT_FORCING_TIME=stage):
+  39.72160 39.96088 39.99911 2.543e-04 8.023e-03 | 1.91e-03, nT=3 nC=102 nbisect=0
 ```
 
 ## What to expect (CONUS 13×7×72, 40-core node, 2026-09-05)

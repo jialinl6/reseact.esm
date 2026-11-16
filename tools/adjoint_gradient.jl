@@ -160,7 +160,7 @@
 #                         at each stage time, the exact reference (see `chem_theta`).
 #                         RESEACT_SUBCYCLE / RESEACT_BUCKET run stage when it is unset
 #                         and refuse an explicit midstep.
-#   RESEACT_TRANSPORT_FORCING_TIME  stage (default) | midstep -- the same choice for the
+#   RESEACT_TRANSPORT_FORCING_TIME  midstep (default) | stage -- the same choice for the
 #                         transport's inputs (see `trans_theta`), under the same
 #                         RESEACT_SUBCYCLE / RESEACT_BUCKET rules.
 # ===========================================================================
@@ -333,12 +333,17 @@ const FORCING_TIME = FORCING_FALLBACK ? "stage" : FORCING_ASKED
 const FORCING_MID = FORCING_TIME == "midstep"
 # THE TRANSPORT'S TIME-DEPENDENT INPUTS (the GEOS-FP fields it blends in time between
 # records, the winds and the surface pressure among them), under the same two modes.
-# `stage`, the default for now, is every line below as it was. `midstep` reads them
-# at the macro step's midpoint, the same `tf` the chemistry's midstep uses, carried
-# in the transport theta (see `trans_theta`), as GEOS-Chem holds its A3 winds over
-# each 3-h interval. Held to the chemistry switch's RESEACT_SUBCYCLE /
-# RESEACT_BUCKET rules; with stage the default, that leaves the refusal.
-const TRANSPORT_ASKED = get(ENV, "RESEACT_TRANSPORT_FORCING_TIME", "stage")
+# `midstep`, the default, reads them at the macro step's midpoint, the same `tf` the
+# chemistry's midstep uses, carried in the transport theta (see `trans_theta`), as
+# GEOS-Chem holds its A3 winds over each 3-h interval. `stage`, the exact reference
+# and the default until 2026-11-14, is every line below as it was before the switch
+# existed. Measured on the cluster: the adjoint demo's identity at 3.4e-16 relative
+# and every finite-difference check within 7.7e-10; CONUS 24 h on 8 shards, identity
+# PASS, forward 139.1 -> 129.6 s, backward 359.3 -> 352.6 s.
+#
+# Held to the chemistry switch's RESEACT_SUBCYCLE / RESEACT_BUCKET rules: with the
+# switch unset they run stage and say so; an explicit midstep is refused.
+const TRANSPORT_ASKED = get(ENV, "RESEACT_TRANSPORT_FORCING_TIME", "midstep")
 TRANSPORT_ASKED in ("stage", "midstep") ||
     error("RESEACT_TRANSPORT_FORCING_TIME must be stage or midstep, got $TRANSPORT_ASKED")
 const TRANSPORT_FALLBACK = TRANSPORT_ASKED == "midstep" && (SUBCYCLE || BUCKETK > 0)

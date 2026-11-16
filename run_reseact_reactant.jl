@@ -96,7 +96,7 @@
 #                                step, or at each stage time, the exact reference (see
 #                                run_reseact.jl). A macro step here is one stop-grid
 #                                interval, so the midpoint is that interval's.
-#   RESEACT_TRANSPORT_FORCING_TIME  stage (default) | midstep -- the same choice for the
+#   RESEACT_TRANSPORT_FORCING_TIME  midstep (default) | stage -- the same choice for the
 #                                transport's inputs (see run_reseact.jl)
 #
 # Helper code it pulls in (see HELPERS.md for the migration plan):
@@ -357,11 +357,13 @@ say("  chemistry time-dependent inputs at: " *
 FORCING_MID && MACRO_DT > 600 &&
     say("  !! RESEACT_MACRO_DT=$(round(Int, MACRO_DT)) s under midstep: the chemistry's " *
         "time-dependent inputs are held fixed over each whole macro step (GEOS-Chem-like at 300 s)")
-# RESEACT_TRANSPORT_FORCING_TIME=midstep does the same for the transport (stage is the
-# default for now; see run_reseact.jl): its RHS reads the macro step's midpoint, `tmid`
-# in the transport `adaptive_solve`'s aux, for the same MLIR reason. Under stage the
-# aux and the program are what they were.
-const TRANSPORT_FORCING_TIME = get(ENV, "RESEACT_TRANSPORT_FORCING_TIME", "stage")
+# RESEACT_TRANSPORT_FORCING_TIME=midstep, the default, does the same for the transport
+# (stage is the exact reference, and the default until 2026-11-14; see run_reseact.jl):
+# its RHS reads the macro step's midpoint, `tmid` in the transport `adaptive_solve`'s
+# aux, for the same MLIR reason. Under stage the aux and the program are what they
+# were. Measured on the cluster against the native runner: 2.0e-9 on O3 min and
+# 1.0e-5 on OH max, the same difference as at stage.
+const TRANSPORT_FORCING_TIME = get(ENV, "RESEACT_TRANSPORT_FORCING_TIME", "midstep")
 TRANSPORT_FORCING_TIME in ("stage", "midstep") ||
     error("RESEACT_TRANSPORT_FORCING_TIME must be stage or midstep, got $TRANSPORT_FORCING_TIME")
 const TRANSPORT_MID = TRANSPORT_FORCING_TIME == "midstep"

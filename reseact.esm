@@ -23093,7 +23093,8 @@
   "index_sets": {
     "gf_t": {
       "kind": "interval",
-      "size": 2
+      "size": 2,
+      "records": true
     },
     "gf_lev": {
       "kind": "interval",

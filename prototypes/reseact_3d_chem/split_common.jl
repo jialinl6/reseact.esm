@@ -21,6 +21,10 @@ using EarthSciASTSplitter: split_system, stencil_vs_pointwise, spatially_coupled
                            contains_op, references
 using EarthSciIO, JSON3, Dates
 const EA = EarthSciAST
+# EarthSciAST 0.11+ dropped `_provider_const_field` (a one-line wrapper of `_sample_field`, which remains): the
+# runner and tools call it at every forcing refresh, so define the same thing where it is missing.
+isdefined(EA, :_provider_const_field) ||
+    @eval EA _provider_const_field(sample, var::AbstractString) = Array{Float64}(_sample_field(sample, String(var)))
 
 # --------------------------------------------------------------------------- #
 # 0. The splitting rule: stencil_vs_pointwise, but following OBSERVEDS.

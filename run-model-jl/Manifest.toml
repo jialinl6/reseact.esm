@@ -505,7 +505,7 @@ version = "0.6.1"
 [[deps.EarthSciASTSplitter]]
 deps = ["EarthSciAST"]
 git-tree-sha1 = "28e084d2977365ed32677430733cc360fc470982"
-repo-rev = "sync/upstream-2026-11"
+repo-rev = "31cf7a84f069b401957c05bee145a77be8f05ba0"
 repo-url = "https://github.com/jialinl6/EarthSciASTSplitter.jl.git"
 uuid = "9db91454-864a-4b1e-81d2-80df174b7aae"
 version = "0.1.0"
@@ -517,10 +517,10 @@ weakdeps = ["OrdinaryDiffEqOperatorSplitting", "SciMLBase"]
 
 [[deps.EarthSciIO]]
 deps = ["CRC32c", "Dates", "Downloads", "FileWatching", "JSON", "NCDatasets", "SHA", "UUIDs", "ZipFile"]
-git-tree-sha1 = "1af6bca7e9de1592471ab4cba201fe1d27bab0f7"
-repo-rev = "770dbc22d557e6e2ae87d9bccd7386f45764e9d0"
+git-tree-sha1 = "4f20603c92f880bbaf57aceb56764be0a1d847f1"
+repo-rev = "09921f781443f5c26ff0411402cdcf1fab79adcc"
 repo-subdir = "julia"
-repo-url = "https://github.com/EarthSciML/EarthSciIO.git"
+repo-url = "https://github.com/jialinl6/EarthSciIO.git"
 uuid = "180e2c70-dda6-501b-9997-3c819c50e0c3"
 version = "0.4.0"
 

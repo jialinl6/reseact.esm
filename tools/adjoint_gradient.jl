@@ -525,7 +525,10 @@ if SYMJAC
         band_program(splitparts[2]; source_layout = (u0 = u0, p = p, var_map = var_map),
             build_kwargs = (; parameter_overrides = ov, const_arrays = merged_const,
                               param_arrays = merged_param,
-                              materialize_out = EA.DiscreteMaterializer()))
+                              materialize_out = EA.DiscreteMaterializer()),
+            # EarthSciASTDiff 0.6: a FlattenedSystem carries no data_sources, so the data-fed parameters' sources
+            # come from the model document (as run_reseact.jl passes them)
+            data_sources = EA.load_path(MODEL; metaparameters = GRID_MP).data_sources)
     end
     say(@sprintf("  band program %.1f s (document %.1f, build %.1f, pattern %.1f, scatter %.1f)   %s",
                  time() - tj, BAND.timings.doc, BAND.timings.build, BAND.timings.pattern,

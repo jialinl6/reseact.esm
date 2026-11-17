@@ -460,10 +460,10 @@ version = "1.7.0"
 
 [[deps.EarthSciAST]]
 deps = ["Dates", "JSON3", "JSONSchema", "LinearAlgebra", "OrderedCollections", "Polyester", "PrecompileTools", "Printf", "RuntimeGeneratedFunctions", "SHA", "Serialization", "Tullio", "Unitful"]
-git-tree-sha1 = "e34971609e923f8637dfe8bab2bfeecb54db6581"
-repo-rev = "24f13caac7081b7d04513f0fe43aa0ac578e3d42"
+git-tree-sha1 = "b777935e48030729a3cd6092f97c7e78f5d5d254"
+repo-rev = "6278b4800104d96aba1463af9db00d839acf8d39"
 repo-subdir = "pkg/EarthSciAST.jl"
-repo-url = "https://github.com/EarthSciML/EarthSciAST.git"
+repo-url = "https://github.com/jialinl6/EarthSciAST.git"
 uuid = "c7bf5e87-b31b-4281-bdce-ffb8a46ec87c"
 version = "0.12.1"
 

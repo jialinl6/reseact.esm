@@ -27,7 +27,7 @@ SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [sources]
-EarthSciAST = {url = "https://github.com/jialinl6/EarthSciAST.git", rev = "6278b4800104d96aba1463af9db00d839acf8d39", subdir = "pkg/EarthSciAST.jl"}
+EarthSciAST = {url = "https://github.com/jialinl6/EarthSciAST.git", rev = "6529fe70453c53c348a73bc3bd9aeb85c896fa70", subdir = "pkg/EarthSciAST.jl"}
 EarthSciASTDiff = {url = "https://github.com/EarthSciML/EarthSciASTDiff.git", rev = "9891c3005a31b74a0547498d0d2981ebb69cdc14", subdir = "pkg/EarthSciASTDiff.jl"}
 EarthSciASTSplitter = {url = "https://github.com/jialinl6/EarthSciASTSplitter.jl.git", rev = "31cf7a84f069b401957c05bee145a77be8f05ba0"}
 EarthSciIO = {url = "https://github.com/jialinl6/EarthSciIO.git", rev = "09921f781443f5c26ff0411402cdcf1fab79adcc", subdir = "julia"}
